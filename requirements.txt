@@ -2,5 +2,3 @@ aiogram==3.7.0
 openai>=1.0.0
 python-dotenv
 fonttools
-pydantic==2.7.4
-pydantic-core==2.18.4
