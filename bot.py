@@ -1,497 +1,484 @@
 diff --git a/bot.py b/bot.py
-index 203258706fac59c6cf8532c46007c63ff1e0f02f..52ac23ce05564ceddbae3059353dbcc5f6371f50 100644
+index 8b5b3277787d9d47d5ca01bf950c0f2722b10f08..203258706fac59c6cf8532c46007c63ff1e0f02f 100644
 --- a/bot.py
 +++ b/bot.py
-@@ -1,1941 +1,406 @@
--#!/usr/bin/env python3
--"""
--Sticker & Emoji Recolor Bot
--Python 3.8+, aiogram 3.7.0+, SQLite
--"""
--
--import os
--import io
--import re
--import json
--import gzip
--import struct
--import asyncio
--import logging
--import sqlite3
--import tempfile
--import shutil
--import colorsys
--from datetime import datetime, timedelta
--from pathlib import Path
--from typing import Optional, List, Tuple, Dict, Any
--from dataclasses import dataclass, field
--
--from dotenv import load_dotenv
--
--from aiogram import Bot, Dispatcher, Router, F
--from aiogram.types import (
--    Message, CallbackQuery, FSInputFile, BufferedInputFile,
--    InlineKeyboardMarkup, InlineKeyboardButton,
--    InputSticker, StickerSet, Sticker,
--    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
--)
--from aiogram.filters import Command, CommandStart, StateFilter
--from aiogram.fsm.context import FSMContext
--from aiogram.fsm.state import State, StatesGroup
--from aiogram.fsm.storage.memory import MemoryStorage
--from aiogram.enums import ParseMode, StickerFormat
--from aiogram.client.default import DefaultBotProperties
--
--load_dotenv()
--
--logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
--logger = logging.getLogger(__name__)
--
--BOT_TOKEN = os.getenv("BOT_TOKEN", "")
--ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
--TEMP_DIR = Path(tempfile.gettempdir()) / "recolor_bot"
--TEMP_DIR.mkdir(exist_ok=True)
--
--# ─── Database ───────────────────────────────────────────────────────────────
--
--class Database:
--    def __init__(self, db_path: str = "bot_database.db"):
--        self.db_path = db_path
--        self.conn: Optional[sqlite3.Connection] = None
--
--    def connect(self):
--        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
--        self.conn.row_factory = sqlite3.Row
--        self._create_tables()
--
--    def _create_tables(self):
--        c = self.conn.cursor()
--        c.executescript("""
--            CREATE TABLE IF NOT EXISTS users (
--                user_id INTEGER PRIMARY KEY,
--                username TEXT,
--                first_name TEXT,
--                last_name TEXT,
--                language_code TEXT,
--                is_banned INTEGER DEFAULT 0,
--                is_premium INTEGER DEFAULT 0,
--                first_seen TEXT DEFAULT (datetime('now')),
--                last_active TEXT DEFAULT (datetime('now')),
--                total_recolors INTEGER DEFAULT 0,
--                total_packs_created INTEGER DEFAULT 0
--            );
--
--            CREATE TABLE IF NOT EXISTS recolor_history (
--                id INTEGER PRIMARY KEY AUTOINCREMENT,
--                user_id INTEGER,
--                action_type TEXT,
--                sticker_set_name TEXT,
--                color_hex TEXT,
--                items_count INTEGER DEFAULT 1,
--                created_at TEXT DEFAULT (datetime('now')),
--                FOREIGN KEY (user_id) REFERENCES users(user_id)
--            );
--
--            CREATE TABLE IF NOT EXISTS admin_log (
--                id INTEGER PRIMARY KEY AUTOINCREMENT,
--                admin_id INTEGER,
--                action TEXT,
--                target_user_id INTEGER,
--                details TEXT,
--                created_at TEXT DEFAULT (datetime('now'))
--            );
--
--            CREATE TABLE IF NOT EXISTS settings (
--                key TEXT PRIMARY KEY,
--                value TEXT
--            );
--
--            CREATE TABLE IF NOT EXISTS broadcast_history (
--                id INTEGER PRIMARY KEY AUTOINCREMENT,
--                admin_id INTEGER,
--                message_text TEXT,
--                recipients_count INTEGER DEFAULT 0,
--                success_count INTEGER DEFAULT 0,
--                fail_count INTEGER DEFAULT 0,
--                created_at TEXT DEFAULT (datetime('now'))
--            );
--        """)
--        self.conn.commit()
--
--    def upsert_user(self, user_id: int, username: str = None, first_name: str = None,
--                    last_name: str = None, language_code: str = None, is_premium: bool = False):
--        c = self.conn.cursor()
--        c.execute("""
--            INSERT INTO users (user_id, username, first_name, last_name, language_code, is_premium, last_active)
--            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
--            ON CONFLICT(user_id) DO UPDATE SET
--                username=excluded.username,
--                first_name=excluded.first_name,
--                last_name=excluded.last_name,
--                language_code=excluded.language_code,
--                is_premium=excluded.is_premium,
--                last_active=datetime('now')
--        """, (user_id, username, first_name, last_name, language_code, int(is_premium)))
--        self.conn.commit()
--
--    def is_banned(self, user_id: int) -> bool:
--        c = self.conn.cursor()
--        c.execute("SELECT is_banned FROM users WHERE user_id=?", (user_id,))
--        row = c.fetchone()
--        return bool(row and row["is_banned"])
--
--    def ban_user(self, user_id: int):
--        c = self.conn.cursor()
--        c.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (user_id,))
--        self.conn.commit()
--
--    def unban_user(self, user_id: int):
--        c = self.conn.cursor()
--        c.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
--        self.conn.commit()
--
--    def increment_recolors(self, user_id: int, count: int = 1):
--        c = self.conn.cursor()
--        c.execute("UPDATE users SET total_recolors = total_recolors + ? WHERE user_id=?", (count, user_id))
--        self.conn.commit()
--
--    def increment_packs(self, user_id: int):
--        c = self.conn.cursor()
--        c.execute("UPDATE users SET total_packs_created = total_packs_created + 1 WHERE user_id=?", (user_id,))
--        self.conn.commit()
--
--    def add_recolor_history(self, user_id: int, action_type: str, sticker_set_name: str = None,
--                            color_hex: str = None, items_count: int = 1):
--        c = self.conn.cursor()
--        c.execute("""
--            INSERT INTO recolor_history (user_id, action_type, sticker_set_name, color_hex, items_count)
--            VALUES (?, ?, ?, ?, ?)
--        """, (user_id, action_type, sticker_set_name, color_hex, items_count))
--        self.conn.commit()
--
--    def add_admin_log(self, admin_id: int, action: str, target_user_id: int = None, details: str = None):
--        c = self.conn.cursor()
--        c.execute("""
--            INSERT INTO admin_log (admin_id, action, target_user_id, details)
--            VALUES (?, ?, ?, ?)
--        """, (admin_id, action, target_user_id, details))
--        self.conn.commit()
--
--    def get_stats(self) -> dict:
--        c = self.conn.cursor()
--        c.execute("SELECT COUNT(*) as cnt FROM users")
--        total_users = c.fetchone()["cnt"]
--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_banned=1")
--        banned_users = c.fetchone()["cnt"]
--        c.execute("SELECT COALESCE(SUM(total_recolors),0) as cnt FROM users")
--        total_recolors = c.fetchone()["cnt"]
--        c.execute("SELECT COALESCE(SUM(total_packs_created),0) as cnt FROM users")
--        total_packs = c.fetchone()["cnt"]
--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active >= datetime('now', '-1 day')")
--        active_today = c.fetchone()["cnt"]
--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active >= datetime('now', '-7 day')")
--        active_week = c.fetchone()["cnt"]
--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_premium=1")
--        premium_users = c.fetchone()["cnt"]
--        return {
--            "total_users": total_users,
--            "banned_users": banned_users,
--            "total_recolors": total_recolors,
--            "total_packs": total_packs,
--            "active_today": active_today,
--            "active_week": active_week,
--            "premium_users": premium_users,
--        }
--
--    def get_all_user_ids(self, exclude_banned: bool = True) -> List[int]:
--        c = self.conn.cursor()
--        if exclude_banned:
--            c.execute("SELECT user_id FROM users WHERE is_banned=0")
--        else:
--            c.execute("SELECT user_id FROM users")
--        return [row["user_id"] for row in c.fetchall()]
--
--    def get_user_info(self, user_id: int) -> Optional[dict]:
--        c = self.conn.cursor()
--        c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
--        row = c.fetchone()
--        if row:
--            return dict(row)
--        return None
--
--    def get_top_users(self, limit: int = 10) -> List[dict]:
--        c = self.conn.cursor()
--        c.execute("SELECT * FROM users ORDER BY total_recolors DESC LIMIT ?", (limit,))
--        return [dict(r) for r in c.fetchall()]
--
--    def get_recent_actions(self, limit: int = 20) -> List[dict]:
--        c = self.conn.cursor()
--        c.execute("SELECT * FROM recolor_history ORDER BY created_at DESC LIMIT ?", (limit,))
--        return [dict(r) for r in c.fetchall()]
--
--    def get_admin_logs(self, limit: int = 20) -> List[dict]:
--        c = self.conn.cursor()
--        c.execute("SELECT * FROM admin_log ORDER BY created_at DESC LIMIT ?", (limit,))
--        return [dict(r) for r in c.fetchall()]
--
--    def search_users(self, query: str) -> List[dict]:
--        c = self.conn.cursor()
--        like = f"%{query}%"
--        c.execute("""
--            SELECT * FROM users
--            WHERE username LIKE ? OR first_name LIKE ? OR CAST(user_id AS TEXT) LIKE ?
--            LIMIT 20
--        """, (like, like, like))
--        return [dict(r) for r in c.fetchall()]
--
--    def get_setting(self, key: str, default: str = None) -> Optional[str]:
--        c = self.conn.cursor()
--        c.execute("SELECT value FROM settings WHERE key=?", (key,))
--        row = c.fetchone()
--        return row["value"] if row else default
--
--    def set_setting(self, key: str, value: str):
--        c = self.conn.cursor()
--        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
--        self.conn.commit()
--
--    def add_broadcast(self, admin_id: int, text: str, recipients: int, success: int, fail: int):
--        c = self.conn.cursor()
--        c.execute("""
--            INSERT INTO broadcast_history (admin_id, message_text, recipients_count, success_count, fail_count)
--            VALUES (?, ?, ?, ?, ?)
--        """, (admin_id, text, recipients, success, fail))
--        self.conn.commit()
--
--    def get_user_history(self, user_id: int, limit: int = 10, offset: int = 0) -> List[dict]:
--        c = self.conn.cursor()
--        c.execute(
--            "SELECT * FROM recolor_history WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
--            (user_id, limit, offset)
--        )
--        return [dict(r) for r in c.fetchall()]
--
--    def get_history_count(self, user_id: int) -> int:
--        c = self.conn.cursor()
--        c.execute("SELECT COUNT(*) as cnt FROM recolor_history WHERE user_id=?", (user_id,))
--        return c.fetchone()["cnt"]
--
--
--db = Database()
--
--# ─── Color Processing ───────────────────────────────────────────────────────
--
--PRESET_COLORS = {
--    "red": "#FF0000",
--    "green": "#00FF00",
--    "blue": "#0000FF",
--    "yellow": "#FFFF00",
--    "orange": "#FF8C00",
--    "purple": "#8B00FF",
--    "pink": "#FF69B4",
--    "cyan": "#00FFFF",
--    "white": "#FFFFFF",
--    "black": "#000000",
--    "gold": "#FFD700",
--    "lime": "#32CD32",
--    "teal": "#008080",
--    "magenta": "#FF00FF",
--    "coral": "#FF7F50",
--    "navy": "#000080",
--    "maroon": "#800000",
--    "olive": "#808000",
--    "salmon": "#FA8072",
--    "violet": "#EE82EE",
--}
--
--PRESET_COLORS_RU = {
--    "красный": "#FF0000",
--    "зеленый": "#00FF00",
--    "зелёный": "#00FF00",
--    "синий": "#0000FF",
--    "жёлтый": "#FFFF00",
--    "желтый": "#FFFF00",
--    "оранжевый": "#FF8C00",
--    "фиолетовый": "#8B00FF",
--    "розовый": "#FF69B4",
--    "голубой": "#00FFFF",
--    "белый": "#FFFFFF",
--    "чёрный": "#000000",
--    "черный": "#000000",
--    "золотой": "#FFD700",
--    "бирюзовый": "#008080",
--    "пурпурный": "#FF00FF",
--    "коралловый": "#FF7F50",
--}
--
--
--def parse_color(text: str) -> Optional[str]:
--    """Parse color from text, return HEX string like #RRGGBB or None."""
--    text = text.strip().lower()
--    if text in PRESET_COLORS:
--        return PRESET_COLORS[text]
--    if text in PRESET_COLORS_RU:
--        return PRESET_COLORS_RU[text]
--    # HEX
--    match = re.match(r'^#?([0-9a-fA-F]{6})$', text)
--    if match:
--        return f"#{match.group(1).upper()}"
--    match = re.match(r'^#?([0-9a-fA-F]{3})$', text)
--    if match:
--        h = match.group(1)
--        expanded = ''.join([c * 2 for c in h])
--        return f"#{expanded.upper()}"
--    return None
--
--
--def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
--    hex_color = hex_color.lstrip('#')
--    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
--
--
--def rgb_to_hex(r: int, g: int, b: int) -> str:
--    return f"#{r:02X}{g:02X}{b:02X}"
--
--
--def rgb_to_hsl(r: int, g: int, b: int) -> Tuple[float, float, float]:
--    h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
--    return h, s, l
--
--
--def hsl_to_rgb(h: float, s: float, l: float) -> Tuple[int, int, int]:
--    r, g, b = colorsys.hls_to_rgb(h, l, s)
--    return int(r * 255), int(g * 255), int(b * 255)
--
--
--# ─── TGS (Lottie) Recoloring ────────────────────────────────────────────────
--
--def recolor_lottie_value(obj: Any, target_rgb: Tuple[int, int, int], depth: int = 0) -> Any:
--    """
--    Recursively traverse Lottie JSON and recolor all color properties.
--    Colors in Lottie are stored as arrays [r, g, b] or [r, g, b, a] with values 0-1.
--    """
--    if depth > 100:
--        return obj
--
--    tr, tg, tb = target_rgb
--    target_r, target_g, target_b = tr / 255.0, tg / 255.0, tb / 255.0
--
--    if isinstance(obj, dict):
--        # Check if this is a color property
--        # In Lottie, colors appear in "c" (color) with "k" containing the value
--        # Also in shapes with "ty": "fl" (fill) or "ty": "st" (stroke)
--        new_dict = {}
--        for key, value in obj.items():
--            if key == "k" and _is_color_array(value, obj):
--                new_dict[key] = _recolor_keyframes_or_static(value, target_r, target_g, target_b)
--            else:
--                new_dict[key] = recolor_lottie_value(value, target_rgb, depth + 1)
--        return new_dict
--    elif isinstance(obj, list):
--        return [recolor_lottie_value(item, target_rgb, depth + 1) for item in obj]
--    return obj
--
--
--def _is_color_array(value: Any, parent: dict) -> bool:
--    """Check if a 'k' value in parent dict is a color."""
--    # Parent should have "a" key (animated flag) and be inside a color context
--    # Color contexts: parent has key "ty" not present but is child of fill/stroke
--    # Or parent is a "c" dict
--    # Simplification: check if value looks like color data
--    if isinstance(value, list) and len(value) in (3, 4):
--        if all(isinstance(v, (int, float)) for v in value):
--            if all(0 <= v <= 1.0 for v in value[:3]):
--                return True
--    # Animated color: list of keyframes
--    if isinstance(value, list) and len(value) > 0:
--        if isinstance(value[0], dict) and "s" in value[0]:
--            s = value[0]["s"]
--            if isinstance(s, list) and len(s) in (3, 4):
--                if all(isinstance(v, (int, float)) for v in s[:3]):
--                    if all(0 <= v <= 1.0 for v in s[:3]):
--                        return True
--    return False
--
--
--def _recolor_keyframes_or_static(value: Any, r: float, g: float, b: float) -> Any:
--    """Recolor static color or animated keyframes."""
--    if isinstance(value, list):
--        if len(value) in (3, 4) and all(isinstance(v, (int, float)) for v in value):
--            # Static color
--            alpha = value[3] if len(value) == 4 else 1.0
--            # Preserve luminance relationship
--            orig_h, orig_s, orig_l = rgb_to_hsl(
--                int(value[0] * 255), int(value[1] * 255), int(value[2] * 255)
--            )
--            target_h, target_s, target_l = rgb_to_hsl(
--                int(r * 255), int(g * 255), int(b * 255)
--            )
--            # Use target hue and saturation, but blend luminance
--            new_r, new_g, new_b = hsl_to_rgb(target_h, target_s, orig_l)
--            result = [new_r / 255.0, new_g / 255.0, new_b / 255.0]
--            if len(value) == 4:
--                result.append(alpha)
--            return result
--        elif len(value) > 0 and isinstance(value[0], dict):
--            # Animated keyframes
--            new_kf = []
--            for kf in value:
--                new_kf_item = dict(kf)
--                if "s" in kf and isinstance(kf["s"], list) and len(kf["s"]) in (3, 4):
--                    s = kf["s"]
--                    alpha = s[3] if len(s) == 4 else 1.0
--                    orig_h, orig_s_val, orig_l = rgb_to_hsl(
--                        int(s[0] * 255), int(s[1] * 255), int(s[2] * 255)
--                    )
--                    target_h, target_s_val, target_l = rgb_to_hsl(
--                        int(r * 255), int(g * 255), int(b * 255)
--                    )
--                    nr, ng, nb = hsl_to_rgb(target_h, target_s_val, orig_l)
--                    new_s = [nr / 255.0, ng / 255.0, nb / 255.0]
--                    if len(s) == 4:
--                        new_s.append(alpha)
--                    new_kf_item["s"] = new_s
--                if "e" in kf and isinstance(kf["e"], list) and len(kf["e"]) in (3, 4):
--                    e = kf["e"]
--                    alpha = e[3] if len(e) == 4 else 1.0
--                    orig_h, orig_s_val, orig_l = rgb_to_hsl(
--                        int(e[0] * 255), int(e[1] * 255), int(e[2] * 255)
--                    )
--                    target_h, target_s_val, target_l = rgb_to_hsl(
--                        int(r * 255), int(g * 255), int(b * 255)
--                    )
--                    nr, ng, nb = hsl_to_rgb(target_h, target_s_val, orig_l)
--                    new_e = [nr / 255.0, ng / 255.0, nb / 255.0]
--                    if len(e) == 4:
--                        new_e.append(alpha)
--                    new_kf_item["e"] = new_e
--                new_kf.append(new_kf_item)
--            return new_kf
--    return value
--
--
--def recolor_tgs_data(tgs_bytes: bytes, target_hex: str) -> bytes:
--    """Decompress TGS (gzip Lottie JSON), recolor, recompress."""
--    target_rgb = hex_to_rgb(target_hex)
--    json_data = gzip.decompress(tgs_bytes)
--    lottie = json.loads(json_data)
--    recolored = recolor_lottie_value(lottie, target_rgb)
--    new_json = json.dumps(recolored, separators=(',', ':'))
--    buf = io.BytesIO()
--    with gzip.GzipFile(fileobj=buf, mode='wb') as gz:
--        gz.write(new_json.encode('utf-8'))
--    return buf.getvalue()
--
--
--# ─── WEBM Recoloring (basic approach: we can't easily recolor WEBM without ffmpeg) ──
--
--def can_recolor_format(sticker_format: str) -> bool:
--    """Check if we support recoloring this format."""
--    return sticker_format in ("animated",)  # TGS only for reliable recoloring
--
--
--# ─── FSM States ──────────────────────────────────────────────────────────────
--
--class RecolorStates(StatesGroup):
--    waiting_sticker = State()
--   
+@@ -1,497 +1,1941 @@
+-diff --git a/bot.py b/bot.py
+-index 203258706fac59c6cf8532c46007c63ff1e0f02f..52ac23ce05564ceddbae3059353dbcc5f6371f50 100644
+---- a/bot.py
+-+++ b/bot.py
+-@@ -1,1941 +1,406 @@
+--#!/usr/bin/env python3
+--"""
+--Sticker & Emoji Recolor Bot
+--Python 3.8+, aiogram 3.7.0+, SQLite
+--"""
+--
+--import os
+--import io
+--import re
+--import json
+--import gzip
+--import struct
+--import asyncio
+--import logging
+--import sqlite3
+--import tempfile
+--import shutil
+--import colorsys
+--from datetime import datetime, timedelta
+--from pathlib import Path
+--from typing import Optional, List, Tuple, Dict, Any
+--from dataclasses import dataclass, field
+--
+--from dotenv import load_dotenv
+--
+--from aiogram import Bot, Dispatcher, Router, F
+--from aiogram.types import (
+--    Message, CallbackQuery, FSInputFile, BufferedInputFile,
+--    InlineKeyboardMarkup, InlineKeyboardButton,
+--    InputSticker, StickerSet, Sticker,
+--    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+--)
+--from aiogram.filters import Command, CommandStart, StateFilter
+--from aiogram.fsm.context import FSMContext
+--from aiogram.fsm.state import State, StatesGroup
+--from aiogram.fsm.storage.memory import MemoryStorage
+--from aiogram.enums import ParseMode, StickerFormat
+--from aiogram.client.default import DefaultBotProperties
+--
+--load_dotenv()
+--
+--logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+--logger = logging.getLogger(__name__)
+--
+--BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+--ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+--TEMP_DIR = Path(tempfile.gettempdir()) / "recolor_bot"
+--TEMP_DIR.mkdir(exist_ok=True)
+--
+--# ─── Database ───────────────────────────────────────────────────────────────
+--
+--class Database:
+--    def __init__(self, db_path: str = "bot_database.db"):
+--        self.db_path = db_path
+--        self.conn: Optional[sqlite3.Connection] = None
+--
+--    def connect(self):
+--        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+--        self.conn.row_factory = sqlite3.Row
+--        self._create_tables()
+--
+--    def _create_tables(self):
+--        c = self.conn.cursor()
+--        c.executescript("""
+--            CREATE TABLE IF NOT EXISTS users (
+--                user_id INTEGER PRIMARY KEY,
+--                username TEXT,
+--                first_name TEXT,
+--                last_name TEXT,
+--                language_code TEXT,
+--                is_banned INTEGER DEFAULT 0,
+--                is_premium INTEGER DEFAULT 0,
+--                first_seen TEXT DEFAULT (datetime('now')),
+--                last_active TEXT DEFAULT (datetime('now')),
+--                total_recolors INTEGER DEFAULT 0,
+--                total_packs_created INTEGER DEFAULT 0
+--            );
+--
+--            CREATE TABLE IF NOT EXISTS recolor_history (
+--                id INTEGER PRIMARY KEY AUTOINCREMENT,
+--                user_id INTEGER,
+--                action_type TEXT,
+--                sticker_set_name TEXT,
+--                color_hex TEXT,
+--                items_count INTEGER DEFAULT 1,
+--                created_at TEXT DEFAULT (datetime('now')),
+--                FOREIGN KEY (user_id) REFERENCES users(user_id)
+--            );
+--
+--            CREATE TABLE IF NOT EXISTS admin_log (
+--                id INTEGER PRIMARY KEY AUTOINCREMENT,
+--                admin_id INTEGER,
+--                action TEXT,
+--                target_user_id INTEGER,
+--                details TEXT,
+--                created_at TEXT DEFAULT (datetime('now'))
+--            );
+--
+--            CREATE TABLE IF NOT EXISTS settings (
+--                key TEXT PRIMARY KEY,
+--                value TEXT
+--            );
+--
+--            CREATE TABLE IF NOT EXISTS broadcast_history (
+--                id INTEGER PRIMARY KEY AUTOINCREMENT,
+--                admin_id INTEGER,
+--                message_text TEXT,
+--                recipients_count INTEGER DEFAULT 0,
+--                success_count INTEGER DEFAULT 0,
+--                fail_count INTEGER DEFAULT 0,
+--                created_at TEXT DEFAULT (datetime('now'))
+--            );
+--        """)
+--        self.conn.commit()
+--
+--    def upsert_user(self, user_id: int, username: str = None, first_name: str = None,
+--                    last_name: str = None, language_code: str = None, is_premium: bool = False):
+--        c = self.conn.cursor()
+--        c.execute("""
+--            INSERT INTO users (user_id, username, first_name, last_name, language_code, is_premium, last_active)
+--            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+--            ON CONFLICT(user_id) DO UPDATE SET
+--                username=excluded.username,
+--                first_name=excluded.first_name,
+--                last_name=excluded.last_name,
+--                language_code=excluded.language_code,
+--                is_premium=excluded.is_premium,
+--                last_active=datetime('now')
+--        """, (user_id, username, first_name, last_name, language_code, int(is_premium)))
+--        self.conn.commit()
+--
+--    def is_banned(self, user_id: int) -> bool:
+--        c = self.conn.cursor()
+--        c.execute("SELECT is_banned FROM users WHERE user_id=?", (user_id,))
+--        row = c.fetchone()
+--        return bool(row and row["is_banned"])
+--
+--    def ban_user(self, user_id: int):
+--        c = self.conn.cursor()
+--        c.execute("UPDATE users SET is_banned=1 WHERE user_id=?", (user_id,))
+--        self.conn.commit()
+--
+--    def unban_user(self, user_id: int):
+--        c = self.conn.cursor()
+--        c.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
+--        self.conn.commit()
+--
+--    def increment_recolors(self, user_id: int, count: int = 1):
+--        c = self.conn.cursor()
+--        c.execute("UPDATE users SET total_recolors = total_recolors + ? WHERE user_id=?", (count, user_id))
+--        self.conn.commit()
+--
+--    def increment_packs(self, user_id: int):
+--        c = self.conn.cursor()
+--        c.execute("UPDATE users SET total_packs_created = total_packs_created + 1 WHERE user_id=?", (user_id,))
+--        self.conn.commit()
+--
+--    def add_recolor_history(self, user_id: int, action_type: str, sticker_set_name: str = None,
+--                            color_hex: str = None, items_count: int = 1):
+--        c = self.conn.cursor()
+--        c.execute("""
+--            INSERT INTO recolor_history (user_id, action_type, sticker_set_name, color_hex, items_count)
+--            VALUES (?, ?, ?, ?, ?)
+--        """, (user_id, action_type, sticker_set_name, color_hex, items_count))
+--        self.conn.commit()
+--
+--    def add_admin_log(self, admin_id: int, action: str, target_user_id: int = None, details: str = None):
+--        c = self.conn.cursor()
+--        c.execute("""
+--            INSERT INTO admin_log (admin_id, action, target_user_id, details)
+--            VALUES (?, ?, ?, ?)
+--        """, (admin_id, action, target_user_id, details))
+--        self.conn.commit()
+--
+--    def get_stats(self) -> dict:
+--        c = self.conn.cursor()
+--        c.execute("SELECT COUNT(*) as cnt FROM users")
+--        total_users = c.fetchone()["cnt"]
+--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_banned=1")
+--        banned_users = c.fetchone()["cnt"]
+--        c.execute("SELECT COALESCE(SUM(total_recolors),0) as cnt FROM users")
+--        total_recolors = c.fetchone()["cnt"]
+--        c.execute("SELECT COALESCE(SUM(total_packs_created),0) as cnt FROM users")
+--        total_packs = c.fetchone()["cnt"]
+--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active >= datetime('now', '-1 day')")
+--        active_today = c.fetchone()["cnt"]
+--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE last_active >= datetime('now', '-7 day')")
+--        active_week = c.fetchone()["cnt"]
+--        c.execute("SELECT COUNT(*) as cnt FROM users WHERE is_premium=1")
+--        premium_users = c.fetchone()["cnt"]
+--        return {
+--            "total_users": total_users,
+--            "banned_users": banned_users,
+--            "total_recolors": total_recolors,
+--            "total_packs": total_packs,
+--            "active_today": active_today,
+--            "active_week": active_week,
+--            "premium_users": premium_users,
+--        }
+--
+--    def get_all_user_ids(self, exclude_banned: bool = True) -> List[int]:
+--        c = self.conn.cursor()
+--        if exclude_banned:
+--            c.execute("SELECT user_id FROM users WHERE is_banned=0")
+--        else:
+--            c.execute("SELECT user_id FROM users")
+--        return [row["user_id"] for row in c.fetchall()]
+--
+--    def get_user_info(self, user_id: int) -> Optional[dict]:
+--        c = self.conn.cursor()
+--        c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+--        row = c.fetchone()
+--        if row:
+--            return dict(row)
+--        return None
+--
+--    def get_top_users(self, limit: int = 10) -> List[dict]:
+--        c = self.conn.cursor()
+--        c.execute("SELECT * FROM users ORDER BY total_recolors DESC LIMIT ?", (limit,))
+--        return [dict(r) for r in c.fetchall()]
+--
+--    def get_recent_actions(self, limit: int = 20) -> List[dict]:
+--        c = self.conn.cursor()
+--        c.execute("SELECT * FROM recolor_history ORDER BY created_at DESC LIMIT ?", (limit,))
+--        return [dict(r) for r in c.fetchall()]
+--
+--    def get_admin_logs(self, limit: int = 20) -> List[dict]:
+--        c = self.conn.cursor()
+--        c.execute("SELECT * FROM admin_log ORDER BY created_at DESC LIMIT ?", (limit,))
+--        return [dict(r) for r in c.fetchall()]
+--
+--    def search_users(self, query: str) -> List[dict]:
+--        c = self.conn.cursor()
+--        like = f"%{query}%"
+--        c.execute("""
+--            SELECT * FROM users
+--            WHERE username LIKE ? OR first_name LIKE ? OR CAST(user_id AS TEXT) LIKE ?
+--            LIMIT 20
+--        """, (like, like, like))
+--        return [dict(r) for r in c.fetchall()]
+--
+--    def get_setting(self, key: str, default: str = None) -> Optional[str]:
+--        c = self.conn.cursor()
+--        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+--        row = c.fetchone()
+--        return row["value"] if row else default
+--
+--    def set_setting(self, key: str, value: str):
+--        c = self.conn.cursor()
+--        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+--        self.conn.commit()
+--
+--    def add_broadcast(self, admin_id: int, text: str, recipients: int, success: int, fail: int):
+--        c = self.conn.cursor()
+--        c.execute("""
+--            INSERT INTO broadcast_history (admin_id, message_text, recipients_count, success_count, fail_count)
+--            VALUES (?, ?, ?, ?, ?)
+--        """, (admin_id, text, recipients, success, fail))
+--        self.conn.commit()
+--
+--    def get_user_history(self, user_id: int, limit: int = 10, offset: int = 0) -> List[dict]:
+--        c = self.conn.cursor()
+--        c.execute(
+--            "SELECT * FROM recolor_history WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+--            (user_id, limit, offset)
+--        )
+--        return [dict(r) for r in c.fetchall()]
+--
+--    def get_history_count(self, user_id: int) -> int:
+--        c = self.conn.cursor()
+--        c.execute("SELECT COUNT(*) as cnt FROM recolor_history WHERE user_id=?", (user_id,))
+--        return c.fetchone()["cnt"]
+--
+--
+--db = Database()
+--
+--# ─── Color Processing ───────────────────────────────────────────────────────
+--
+--PRESET_COLORS = {
+--    "red": "#FF0000",
+--    "green": "#00FF00",
+--    "blue": "#0000FF",
+--    "yellow": "#FFFF00",
+--    "orange": "#FF8C00",
+--    "purple": "#8B00FF",
+--    "pink": "#FF69B4",
+--    "cyan": "#00FFFF",
+--    "white": "#FFFFFF",
+--    "black": "#000000",
+--    "gold": "#FFD700",
+--    "lime": "#32CD32",
+--    "teal": "#008080",
+--    "magenta": "#FF00FF",
+--    "coral": "#FF7F50",
+--    "navy": "#000080",
+--    "maroon": "#800000",
+--    "olive": "#808000",
+--    "salmon": "#FA8072",
+--    "violet": "#EE82EE",
+--}
+--
+--PRESET_COLORS_RU = {
+--    "красный": "#FF0000",
+--    "зеленый": "#00FF00",
+--    "зелёный": "#00FF00",
+--    "синий": "#0000FF",
+--    "жёлтый": "#FFFF00",
+--    "желтый": "#FFFF00",
+--    "оранжевый": "#FF8C00",
+--    "фиолетовый": "#8B00FF",
+--    "розовый": "#FF69B4",
+--    "голубой": "#00FFFF",
+--    "белый": "#FFFFFF",
+--    "чёрный": "#000000",
+--    "черный": "#000000",
+--    "золотой": "#FFD700",
+--    "бирюзовый": "#008080",
+--    "пурпурный": "#FF00FF",
+--    "коралловый": "#FF7F50",
+--}
+--
+--
+--def parse_color(text: str) -> Optional[str]:
+--    """Parse color from text, return HEX string like #RRGGBB or None."""
+--    text = text.strip().lower()
+--    if text in PRESET_COLORS:
+--        return PRESET_COLORS[text]
+--    if text in PRESET_COLORS_RU:
+--        return PRESET_COLORS_RU[text]
+--    # HEX
+--    match = re.match(r'^#?([0-9a-fA-F]{6})$', text)
+--    if match:
+--        return f"#{match.group(1).upper()}"
+--    match = re.match(r'^#?([0-9a-fA-F]{3})$', text)
+--    if match:
+--        h = match.group(1)
+--        expanded = ''.join([c * 2 for c in h])
+--        return f"#{expanded.upper()}"
+--    return None
+--
+--
+--def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+--    hex_color = hex_color.lstrip('#')
+--    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+--
+--
+--def rgb_to_hex(r: int, g: int, b: int) -> str:
+--    return f"#{r:02X}{g:02X}{b:02X}"
+--
+--
+--def rgb_to_hsl(r: int, g: int, b: int) -> Tuple[float, float, float]:
+--    h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+--    return h, s, l
+--
+--
+--def hsl_to_rgb(h: float, s: float, l: float) -> Tuple[int, int, int]:
+--    r, g, b = colorsys.hls_to_rgb(h, l, s)
+--    return int(r * 255), int(g * 255), int(b * 255)
+--
+--
+--# ─── TGS (Lottie) Recoloring ────────────────────────────────────────────────
+--
+--def recolor_lottie_value(obj: Any, target_rgb: Tuple[int, int, int], depth: int = 0) -> Any:
+--    """
+--    Recursively traverse Lottie JSON and recolor all color properties.
+--    Colors in Lottie are stored as arrays [r, g, b] or [r, g, b, a] with values 0-1.
+--    """
+--    if depth > 100:
+--        return obj
+--
+--    tr, tg, tb = target_rgb
+--    target_r, target_g, target_b = tr / 255.0, tg / 255.0, tb / 255.0
+--
+--    if isinstance(obj, dict):
+--        # Check if this is a color property
+--        # In Lottie, colors appear in "c" (color) with "k" containing the value
+--        # Also in shapes with "ty": "fl" (fill) or "ty": "st" (stroke)
+--        new_dict = {}
+--        for key, value in obj.items():
+--            if key == "k" and _is_color_array(value, obj):
+--                new_dict[key] = _recolor_keyframes_or_static(value, target_r, target_g, target_b)
+--            else:
+--                new_dict[key] = recolor_lottie_value(value, target_rgb, depth + 1)
+--        return new_dict
+--    elif isinstance(obj, list):
+--        return [recolor_lottie_value(item, target_rgb, depth + 1) for item in obj]
+--    return obj
+--
+--
+--def _is_color_array(value: Any, parent: dict) -> bool:
+--    """Check if a 'k' value in parent dict is a color."""
+--    # Parent should have "a" key (animated flag) and be inside a color context
+--    # Color contexts: parent has key "ty" not present but is child of fill/stroke
+--    # Or parent is a "c" dict
+--    # Simplification: check if value looks like color data
+--    if isinstance(value, list) and len(value) in (3, 4):
+--        if all(isinstance(v, (int, float)) for v in value):
+--            if all(0 <= v <= 1.0 for v in value[:3]):
+--                return True
+--    # Animated color: list of keyframes
+--    if isinstance(value, list) and len(value) > 0:
+--        if isinstance(value[0], dict) and "s" in value[0]:
+--            s = value[0]["s"]
+--            if isinstance(s, list) and len(s) in (3, 4):
+--                if all(isinstance(v, (int, float)) for v in s[:3]):
+--                    if all(0 <= v <= 1.0 for v in s[:3]):
+--                        return True
+--    return False
+--
+--
+--def _recolor_keyframes_or_static(value: Any, r: float, g: float, b: float) -> Any:
+--    """Recolor static color or animated keyframes."""
+--    if isinstance(value, list):
+--        if len(value) in (3, 4) and all(isinstance(v, (int, float)) for v in value):
+--            # Static color
+--            alpha = value[3] if len(value) == 4 else 1.0
+--            # Preserve luminance relationship
+--            orig_h, orig_s, orig_l = rgb_to_hsl(
+--                int(value[0] * 255), int(value[1] * 255), int(value[2] * 255)
+--            )
+--            target_h, target_s, target_l = rgb_to_hsl(
+--                int(r * 255), int(g * 255), int(b * 255)
+--            )
+--            # Use target hue and saturation, but blend luminance
+--            new_r, new_g, new_b = hsl_to_rgb(target_h, target_s, orig_l)
+--            result = [new_r / 255.0, new_g / 255.0, new_b / 255.0]
+--            if len(value) == 4:
+--                result.append(alpha)
+--            return result
+--        elif len(value) > 0 and isinstance(value[0], dict):
+--            # Animated keyframes
+--            new_kf = []
+--            for kf in value:
+--                new_kf_item = dict(kf)
+--                if "s" in kf and isinstance(kf["s"], list) and len(kf["s"]) in (3, 4):
+--                    s = kf["s"]
+--                    alpha = s[3] if len(s) == 4 else 1.0
+--                    orig_h, orig_s_val, orig_l = rgb_to_hsl(
+--                        int(s[0] * 255), int(s[1] * 255), int(s[2] * 255)
+--                    )
+--                    target_h, target_s_val, target_l = rgb_to_hsl(
+--                        int(r * 255), int(g * 255), int(b * 255)
+--                    )
+--                    nr, ng, nb = hsl_to_rgb(target_h, target_s_val, orig_l)
+--                    new_s = [nr / 255.0, ng / 255.0, nb / 255.0]
+--                    if len(s) == 4:
+--                        new_s.append(alpha)
+--                    new_kf_item["s"] = new_s
+--                if "e" in kf and isinstance(kf["e"], list) and len(kf["e"]) in (3, 4):
+--                    e = kf["e"]
+--                    alpha = e[3] if len(e) == 4 else 1.0
+--                    orig_h, orig_s_val, orig_l = rgb_to_hsl(
+--                        int(e[0] * 255), int(e[1] * 255), int(e[2] * 255)
+--                    )
+--                    target_h, target_s_val, target_l = rgb_to_hsl(
+--                        int(r * 255), int(g * 255), int(b * 255)
+--                    )
+--                    nr, ng, nb = hsl_to_rgb(target_h, target_s_val, orig_l)
+--                    new_e = [nr / 255.0, ng / 255.0, nb / 255.0]
+--                    if len(e) == 4:
+--                        new_e.append(alpha)
+--                    new_kf_item["e"] = new_e
+--                new_kf.append(new_kf_item)
+--            return new_kf
+--    return value
+--
+--
+--def recolor_tgs_data(tgs_bytes: bytes, target_hex: str) -> bytes:
+--    """Decompress TGS (gzip Lottie JSON), recolor, recompress."""
+--    target_rgb = hex_to_rgb(target_hex)
+--    json_data = gzip.decompress(tgs_bytes)
+--    lottie = json.loads(json_data)
+--    recolored = recolor_lottie_value(lottie, target_rgb)
+--    new_json
