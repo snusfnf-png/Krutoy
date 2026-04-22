@@ -1,5 +1,7 @@
 """
 bot.py — Telegram Sticker Colorizer Bot
+Поддерживает: статичные стикеры, анимированные (.tgs), видео, фото,
+              премиум эмодзи (статичные и анимированные).
 """
 
 import logging
@@ -9,13 +11,13 @@ import asyncio
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputSticker, ReplyKeyboardMarkup
+    InputSticker, ReplyKeyboardMarkup, MessageEntity
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, MessageEntityType
 from telegram.error import TelegramError
 from PIL import Image
 
@@ -32,7 +34,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 MAX_STICKERS_PER_PACK = 120
 
 # ──────────────────────────────────────────────────────────────
-# Emoji shortcuts (plain — работают везде без Bot API ограничений)
+# Emoji shortcuts
 # ──────────────────────────────────────────────────────────────
 E_BOT    = "🤖"
 E_CHECK  = "✅"
@@ -49,6 +51,7 @@ E_PARTY  = "🎉"
 E_PENCIL = "🖋"
 E_NOTIFY = "🔔"
 E_SMILE  = "🙂"
+E_STAR   = "⭐"
 
 # ──────────────────────────────────────────────────────────────
 # Color palette  (label, color_key, emoji)
@@ -119,7 +122,7 @@ def make_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[["📦 Мои паки", "ℹ️ Помощь"]],
         resize_keyboard=True,
-        input_field_placeholder="Отправь стикер для раскраски 🎨"
+        input_field_placeholder="Отправь стикер или премиум эмодзи 🎨"
     )
 
 
@@ -131,13 +134,13 @@ def pack_key(user_id: int, stype: str) -> str:
     return f"pack_{user_id}_{stype}"
 
 
-def pack_name(user_id: int, bot_username: str, index: int, stype: str) -> str:
+def build_pack_name(user_id: int, bot_username: str, index: int, stype: str) -> str:
     suffix = {"animated": "a", "video": "v", "static": "s"}.get(stype, "s")
     idx = "" if index == 1 else str(index)
     return f"u{user_id}_{suffix}{idx}_by_{bot_username}"
 
 
-def pack_title(user_id: int, index: int, stype: str) -> str:
+def build_pack_title(user_id: int, index: int, stype: str) -> str:
     label = {"animated": "Анимации", "video": "Видео", "static": "Стикеры"}.get(stype, "Стикеры")
     idx = f" · {index}" if index > 1 else ""
     return f"🎨 {label} {user_id}{idx}"
@@ -150,8 +153,8 @@ async def get_pack_info(context: ContextTypes.DEFAULT_TYPE, user_id: int, stype:
         context.bot_data[key] = {"index": 1}
 
     index = context.bot_data[key]["index"]
-    pname = pack_name(user_id, bot_username, index, stype)
-    ptitle = pack_title(user_id, index, stype)
+    pname = build_pack_name(user_id, bot_username, index, stype)
+    ptitle = build_pack_title(user_id, index, stype)
 
     try:
         pack = await context.bot.get_sticker_set(pname)
@@ -159,8 +162,8 @@ async def get_pack_info(context: ContextTypes.DEFAULT_TYPE, user_id: int, stype:
         if count >= MAX_STICKERS_PER_PACK:
             index += 1
             context.bot_data[key]["index"] = index
-            pname = pack_name(user_id, bot_username, index, stype)
-            ptitle = pack_title(user_id, index, stype)
+            pname = build_pack_name(user_id, bot_username, index, stype)
+            ptitle = build_pack_title(user_id, index, stype)
             return {"name": pname, "title": ptitle, "exists": False}
         return {"name": pname, "title": ptitle, "exists": True}
     except TelegramError:
@@ -174,27 +177,27 @@ async def add_to_pack(context, user_id: int, data: bytes, stype: str, emoji: str
 
     buf = io.BytesIO(data)
     buf.name = fname
-    sticker = InputSticker(sticker=buf, emoji_list=[emoji], format=fmt)
+    sticker_obj = InputSticker(sticker=buf, emoji_list=[emoji], format=fmt)
 
     if not info["exists"]:
         await context.bot.create_new_sticker_set(
             user_id=user_id,
             name=info["name"],
             title=info["title"],
-            stickers=[sticker],
+            stickers=[sticker_obj],
         )
         logger.info(f"Created pack {info['name']} for user {user_id}")
     else:
         await context.bot.add_sticker_to_set(
             user_id=user_id,
             name=info["name"],
-            sticker=sticker,
+            sticker=sticker_obj,
         )
     return info["name"]
 
 
 # ──────────────────────────────────────────────────────────────
-# Processing
+# Processing helpers
 # ──────────────────────────────────────────────────────────────
 
 def process_static(data: bytes, color: str) -> bytes:
@@ -226,19 +229,81 @@ async def colorize_and_add(context, user_id: int, pending: dict, color: str) -> 
 
 
 # ──────────────────────────────────────────────────────────────
-# Handlers
+# Premium emoji loader
+# ──────────────────────────────────────────────────────────────
+
+def _extract_custom_emoji_ids(message) -> list[str]:
+    """
+    Extract all unique custom_emoji_id values from message entities.
+    Works for both text messages and captions.
+    """
+    ids = []
+    seen = set()
+    entities = list(message.entities or []) + list(message.caption_entities or [])
+    for ent in entities:
+        if ent.type == MessageEntityType.CUSTOM_EMOJI:
+            eid = getattr(ent, "custom_emoji_id", None)
+            if eid and eid not in seen:
+                ids.append(eid)
+                seen.add(eid)
+    return ids
+
+
+async def load_premium_emoji(context, emoji_id: str) -> dict | None:
+    """
+    Fetch sticker data for a custom emoji id.
+    Returns {"data": bytes, "type": str, "emoji": str} or None.
+    """
+    try:
+        stickers = await context.bot.get_custom_emoji_stickers([emoji_id])
+    except Exception as ex:
+        logger.error(f"get_custom_emoji_stickers failed for {emoji_id}: {ex}")
+        return None
+
+    if not stickers:
+        return None
+
+    sticker = stickers[0]
+    try:
+        file = await context.bot.get_file(sticker.file_id)
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        data = buf.getvalue()
+    except Exception as ex:
+        logger.error(f"Failed to download emoji {emoji_id}: {ex}")
+        return None
+
+    if sticker.is_animated:
+        stype = "animated"
+    elif sticker.is_video:
+        stype = "video"
+    else:
+        stype = "static"
+
+    return {
+        "data": data,
+        "type": stype,
+        "emoji": sticker.emoji or "🎨",
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# Command handlers
 # ──────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"{E_BOT} <b>Привет! Я раскрашиваю стикеры и сохраняю в твой личный пак!</b>\n\n"
+        f"{E_BOT} <b>Привет! Я раскрашиваю стикеры и премиум эмодзи!</b>\n\n"
         f"{E_STICKER} Статичные стикеры\n"
         f"{E_ANIM} Анимированные стикеры (.tgs)\n"
         f"{E_VIDEO} Видео стикеры\n"
+        f"{E_STAR} Премиум эмодзи (статичные и анимированные)\n"
         f"{E_PAINT} Фото и изображения\n\n"
         f"{E_PACK} <b>У каждого пользователя свой пак.</b>\n"
         f"Когда пак заполнится (120 шт) — создам новый автоматически!\n\n"
-        f"{E_SMILE} Отправь стикер прямо сейчас 👇",
+        f"<b>Как отправить премиум эмодзи:</b>\n"
+        f"Просто напиши сообщение с любым премиум эмодзи — я его поймаю и раскрашу!\n\n"
+        f"{E_SMILE} Попробуй прямо сейчас 👇",
         parse_mode=ParseMode.HTML,
         reply_markup=make_main_keyboard()
     )
@@ -248,14 +313,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{E_INFO} <b>Справка</b>\n\n"
         f"{E_PENCIL} <b>Как пользоваться:</b>\n"
-        f"1. Отправь стикер любого типа\n"
+        f"1. Отправь стикер или премиум эмодзи\n"
         f"2. Нажми нужный цвет\n"
         f"3. Получи ссылку на пак {E_CHECK}\n\n"
-        f"{E_PACK} <b>Типы паков:</b>\n"
-        f"• Статичные стикеры → отдельный пак\n"
+        f"{E_STAR} <b>Премиум эмодзи:</b>\n"
+        f"Просто напиши любое премиум эмодзи в чат — бот автоматически его распознает и предложит раскрасить.\n"
+        f"Работает и со статичными, и с анимированными!\n\n"
+        f"{E_PACK} <b>Паки:</b>\n"
+        f"• Статичные → отдельный пак\n"
         f"• Анимированные → отдельный пак\n"
-        f"• Видео-стикеры → отдельный пак\n\n"
-        f"{E_PAINT} Режим «Все 20 цветов» добавляет всё сразу!\n\n"
+        f"• Видео → отдельный пак\n\n"
+        f"{E_PAINT} «Все 20 цветов» добавляет всё сразу!\n\n"
         f"{E_NOTIFY} Команды:\n"
         f"/mypack — ссылки на твои паки\n"
         f"/help — эта справка",
@@ -275,7 +343,7 @@ async def cmd_mypack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         max_index = context.bot_data[key].get("index", 1)
         for idx in range(1, max_index + 1):
-            pname = pack_name(user_id, bot_username, idx, stype)
+            pname = build_pack_name(user_id, bot_username, idx, stype)
             try:
                 pack = await context.bot.get_sticker_set(pname)
                 lines.append(
@@ -295,6 +363,10 @@ async def cmd_mypack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True
     )
 
+
+# ──────────────────────────────────────────────────────────────
+# Message handlers
+# ──────────────────────────────────────────────────────────────
 
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sticker = update.message.sticker
@@ -346,16 +418,72 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
+    """
+    Handles text messages.
+    If the message contains premium emoji (custom_emoji entity) — intercepts and colorizes.
+    Otherwise handles keyboard buttons or shows hint.
+    """
+    message = update.message
+    text = message.text or ""
+    user_id = update.effective_user.id
+
+    # ── Check for premium emoji entities ──
+    emoji_ids = _extract_custom_emoji_ids(message)
+    if emoji_ids:
+        # Take the first premium emoji from the message
+        emoji_id = emoji_ids[0]
+        count = len(emoji_ids)
+
+        status_msg = await message.reply_text(
+            f"{E_STAR} <b>Премиум эмодзи найдено!</b> Загружаю...",
+            parse_mode=ParseMode.HTML
+        )
+
+        pending = await load_premium_emoji(context, emoji_id)
+        if pending is None:
+            await status_msg.edit_text(
+                f"{E_CROSS} Не удалось загрузить это эмодзи. Попробуй другое.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        user_pending[user_id] = pending
+        stype = pending["type"]
+
+        if stype == "animated":
+            type_label = "Анимированное премиум эмодзи"
+            type_icon = E_ANIM
+        elif stype == "video":
+            type_label = "Видео премиум эмодзи"
+            type_icon = E_VIDEO
+        else:
+            type_label = "Премиум эмодзи"
+            type_icon = E_STAR
+
+        extra = f"\n<i>В сообщении {count} эмодзи — раскрашу первое</i>" if count > 1 else ""
+        await status_msg.edit_text(
+            f"{type_icon} <b>{type_label} получен!</b> Выбери цвет:{extra}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=make_color_keyboard()
+        )
+        return
+
+    # ── Keyboard buttons ──
     if text in ("📦 Мои паки", "Мои паки"):
         await cmd_mypack(update, context)
     elif text in ("ℹ️ Помощь", "Помощь"):
         await cmd_help(update, context)
     else:
-        await update.message.reply_text(
-            f"{E_SMILE} Отправь стикер, фото или PNG/WEBP файл — раскрашу!\n/help — справка"
+        await message.reply_text(
+            f"{E_SMILE} Отправь стикер, фото, PNG/WEBP файл или <b>премиум эмодзи</b> — раскрашу!\n"
+            f"/help — справка",
+            parse_mode=ParseMode.HTML
         )
 
+
+# ──────────────────────────────────────────────────────────────
+# Color callback
+# ──────────────────────────────────────────────────────────────
 
 async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -363,7 +491,10 @@ async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     user_id = update.effective_user.id
     if user_id not in user_pending:
-        await query.edit_message_text(f"{E_CROSS} Стикер не найден. Отправь стикер заново.")
+        await query.edit_message_text(
+            f"{E_CROSS} Стикер не найден. Отправь стикер или эмодзи заново.",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     color_name = query.data.replace("color:", "")
@@ -419,7 +550,7 @@ async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except TelegramError as ex:
         logger.error(f"Telegram error: {ex}")
         await query.edit_message_text(
-            f"{E_CROSS} <b>Ошибка Telegram:</b> {ex}\n\nПопробуй отправить стикер заново.",
+            f"{E_CROSS} <b>Ошибка Telegram:</b> {ex}\n\nПопробуй ещё раз.",
             parse_mode=ParseMode.HTML
         )
     except Exception as ex:
@@ -440,14 +571,4 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("mypack", cmd_mypack))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
-    app.add_handler(CallbackQueryHandler(handle_color_callback, pattern=r"^color:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("Bot started!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
-                
+    app.add_handler(M
