@@ -232,7 +232,7 @@ async def colorize_and_add(context, user_id: int, pending: dict, color: str) -> 
 # Premium emoji loader
 # ──────────────────────────────────────────────────────────────
 
-def _extract_custom_emoji_ids(message) -> list[str]:
+def _extract_custom_emoji_ids(message) -> list:
     """
     Extract all unique custom_emoji_id values from message entities.
     Works for both text messages and captions.
@@ -249,7 +249,7 @@ def _extract_custom_emoji_ids(message) -> list[str]:
     return ids
 
 
-async def load_premium_emoji(context, emoji_id: str) -> dict | None:
+async def load_premium_emoji(context, emoji_id: str) -> dict:
     """
     Fetch sticker data for a custom emoji id.
     Returns {"data": bytes, "type": str, "emoji": str} or None.
@@ -571,4 +571,4 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("mypack", cmd_mypack))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
-    app.add_handler(M
+    app.add_handler(MessageHandle
