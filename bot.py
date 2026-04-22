@@ -479,71 +479,14 @@ async def handle_custom_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE
 # Color callback
 # ──────────────────────────────────────────────────────────────
 
-async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled exception while processing update", exc_info=context.error)
 
-    user_id = update.effective_user.id
-    if user_id not in user_pending:
-        await query.edit_message_text(
-            f'{E_CROSS} Стикер не найден. Отправь стикер заново.',
-            parse_mode=ParseMode.HTML
-        )
-        return
 
-    color_name = query.data.replace("color:", "")
-    pending = user_pending[user_id]
-    stype = pending["type"]
-    type_icon = {"animated": E_ANIM, "video": E_VIDEO, "static": E_STICKER}.get(stype, E_STICKER)
-
-    if color_name == "all_pack":
-        await query.edit_message_text(
-            f'{E_PAINT} <b>Добавляю все 20 цветов в пак...</b>\n'
-            f'{E_CLOCK} Это займёт ~40 секунд, подожди!',
-            parse_mode=ParseMode.HTML
-        )
-        colors = [key for _, key, _, _ in COLOR_PRESETS]
-        added = 0
-        pack_name = None
-        errors = []
-
-        for color in colors:
-            try:
-                pack_name = await colorize_and_add(context, user_id, pending, color)
-                added += 1
-                await asyncio.sleep(0.5)
-            except Exception as ex:
-                logger.error(f"Error adding color {color}: {ex}")
-                errors.append(color)
-
-        if pack_name:
-            err_note = f'\n{E_CROSS} Не удалось: {len(errors)} шт.' if errors else ""
-            await query.edit_message_text(
-                f'{E_PARTY} <b>Готово! Добавлено {added}/20 стикеров!</b>{err_note}',
-                parse_mode=ParseMode.HTML,
-                reply_markup=make_pack_link_keyboard(pack_name)
-            )
-        else:
-            await query.edit_message_text(
-                f'{E_CROSS} Не удалось создать пак. Попробуй снова.',
-                parse_mode=ParseMode.HTML
-            )
-
-    else:
-        await query.edit_message_text(
-            f'{type_icon} <b>Раскрашиваю и добавляю в пак...</b>',
-            parse_mode=ParseMode.HTML
-        )
-        try:
-            pack_name = await colorize_and_add(context, user_id, pending, color_name)
-            # Find label for this color
-            label = next((lbl for lbl, key, _, _ in COLOR_PRESETS if key == color_name), color_name)
-
-            await query.edit_message_text(
-                f'{E_CHECK} <b>Добавлено!</b> Цвет: {label}',
-                parse_mode=ParseMode.HTML,
-                reply_markup=make_pack_link_keyboard(pack_name)
-            )
-        except TelegramError as ex:
-            logger.error(f"Telegram error: {ex}")
-            await query.edit_message_text
+if __name__ == "__main__":
+    try:
+        logger.info("Launching bot process...")
+        main()
+    except Exception:
+        logger.exception("Bot crashed on startup")
+        raise
