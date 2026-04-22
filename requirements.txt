@@ -2,5 +2,3 @@ aiogram==3.26.0
 aiosqlite==0.20.0
 Pillow==10.4.0
 python-dotenv==1.0.1
-lottie==0.6.11
-cairosvg==2.7.1
