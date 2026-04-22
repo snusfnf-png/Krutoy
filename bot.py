@@ -258,270 +258,272 @@ async def colorize_and_add(
     stype = pending["type"]
     emoji = pending.get("emoji", "🎨")
     data = pending["data"]
+"""
+colorizer.py — Core image colorization engine for sticker bot.
 
-    if stype == "animated":
-        result = colorize_tgs(data, color)
-    elif stype == "video":
-        result = data  # passthrough (ffmpeg too heavy for free Railway)
-    else:
-        result = process_static(data, color)
+Supports:
+- Solid hue shifts (red, green, blue, etc.)
+- Gradient color maps (sunset, ocean, fire, etc.)
+- Rainbow mode
+- Grayscale / B&W
+- Special effects: galaxy, sakura, ice, gold
+- Random color
+"""
 
-    return await add_to_pack(context, user_id, result, stype, emoji)
-
-
-# ──────────────────────────────────────────────────────────────
-# Command handlers
-# ──────────────────────────────────────────────────────────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f'{E_BOT} <b>Привет! Я раскрашиваю стикеры и сохраняю в твой личный пак!</b>\n\n'
-        f'{E_STICKER} Статичные стикеры\n'
-        f'{E_ANIM} Анимированные стикеры (.tgs)\n'
-        f'{E_VIDEO} Видео стикеры\n'
-        f'{E_PAINT} Фото и изображения\n\n'
-        f'{E_PACK} <b>Каждый пользователь получает свой пак.</b>\n'
-        f'Когда пак заполнится (120 шт) — создам новый автоматически!\n\n'
-        f'{E_SMILE} Отправь стикер прямо сейчас 👇',
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_main_keyboard()
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f'{E_INFO} <b>Справка</b>\n\n'
-        f'{E_PENCIL} <b>Как пользоваться:</b>\n'
-        f'1. Отправь стикер любого типа\n'
-        f'2. Нажми нужный цвет\n'
-        f'3. Получи ссылку на пак {E_CHECK}\n\n'
-        f'{E_PACK} <b>Типы паков:</b>\n'
-        f'• Статичные стикеры → отдельный пак\n'
-        f'• Анимированные → отдельный пак\n'
-        f'• Видео-стикеры → отдельный пак\n\n'
-        f'{E_PAINT} Режим «Все 20 цветов» добавляет всё сразу!\n\n'
-        f'{E_NOTIFY} Команды:\n'
-        f'/mypack — ссылки на твои паки\n'
-        f'/help — эта справка',
-        parse_mode=ParseMode.HTML
-    )
-
-
-async def my_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    bot_username = (await context.bot.get_me()).username
-    lines = [f'{E_PACK} <b>Твои паки:</b>\n']
-    found = False
-
-    for stype, icon in [("static", E_STICKER), ("animated", E_ANIM), ("video", E_VIDEO)]:
-        key = pack_registry_key(user_id, stype)
-        if key not in context.bot_data:
-            continue
-        max_index = context.bot_data[key].get("index", 1)
-        for idx in range(1, max_index + 1):
-            pack_name = build_pack_name(user_id, bot_username, idx, stype)
-            try:
-                pack = await context.bot.get_sticker_set(pack_name)
-                lines.append(
-                    f'{icon} <a href="https://t.me/addstickers/{pack_name}">{pack.title}</a>'
-                    f' — {len(pack.stickers)} шт.'
-                )
-                found = True
-            except Exception:
-                pass
-
-    if not found:
-        lines.append(f'{E_SMILE} Паков пока нет. Отправь стикер и раскрась его!')
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
+import random
+import math
+from PIL import Image, ImageEnhance, ImageFilter
+import numpy as np
 
 
 # ──────────────────────────────────────────────────────────────
-# Message handlers
+# Utility helpers
 # ──────────────────────────────────────────────────────────────
 
-async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sticker = update.message.sticker
-    user_id = update.effective_user.id
-    emoji = sticker.emoji or "🎨"
-
-    file = await sticker.get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-
-    if sticker.is_animated:
-        stype = "animated"
-        icon = E_ANIM
-        msg = f'{E_ANIM} <b>Анимированный стикер получен!</b> Выбери цвет:'
-    elif sticker.is_video:
-        stype = "video"
-        icon = E_VIDEO
-        msg = f'{E_VIDEO} <b>Видео-стикер получен!</b> Выбери цвет:'
-    else:
-        stype = "static"
-        icon = E_STICKER
-        msg = f'{E_STICKER} <b>Стикер получен!</b> Выбери цвет:'
-
-    user_pending[user_id] = {"data": buf.getvalue(), "type": stype, "emoji": emoji}
-    await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+def to_numpy(img: Image.Image) -> np.ndarray:
+    return np.array(img, dtype=np.float32)
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-    user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": "static", "emoji": "🖼"}
-    await update.message.reply_text(
-        f'{E_STICKER} <b>Фото получено!</b> Выбери цвет:',
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+def from_numpy(arr: np.ndarray) -> Image.Image:
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA")
 
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if doc.mime_type not in ("image/png", "image/webp", "image/jpeg"):
-        await update.message.reply_text(
-            f'{E_CROSS} Поддерживаются PNG, WEBP, JPEG.',
-            parse_mode=ParseMode.HTML
-        )
-        return
-    file = await doc.get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-    user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": "static", "emoji": "🖼"}
-    await update.message.reply_text(
-        f'{E_STICKER} <b>Файл получен!</b> Выбери цвет:',
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+def luminance(r, g, b):
+    """Perceived luminance (0–1)."""
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle reply keyboard buttons."""
-    text = update.message.text
-
-    if text in ("📦 Мои паки", "Мои паки"):
-        await my_pack(update, context)
-    elif text in ("ℹ️ Помощь", "Помощь"):
-        await help_cmd(update, context)
-    else:
-        await update.message.reply_text(
-            f'{E_SMILE} Отправь стикер, фото или PNG/WEBP файл — раскрашу!\n/help — справка',
-            parse_mode=ParseMode.HTML
-        )
+def hsl_to_rgb(h, s, l):
+    """Convert HSL (0–1 range each) to RGB (0–255)."""
+    if s == 0:
+        v = int(l * 255)
+        return v, v, v
+    def hue2rgb(p, q, t):
+        if t < 0: t += 1
+        if t > 1: t -= 1
+        if t < 1/6: return p + (q - p) * 6 * t
+        if t < 1/2: return q
+        if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+        return p
+    q = l * (1 + s) if l < 0.5 else l + s - l * s
+    p = 2 * l - q
+    r = hue2rgb(p, q, h + 1/3)
+    g = hue2rgb(p, q, h)
+    b = hue2rgb(p, q, h - 1/3)
+    return int(r * 255), int(g * 255), int(b * 255)
 
 
 # ──────────────────────────────────────────────────────────────
-# Color callback
+# Color map definitions
+# Each entry: list of (luminance_threshold, (R, G, B)) tuples
+# Pixels are mapped based on their brightness
 # ──────────────────────────────────────────────────────────────
 
-async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+COLOR_MAPS = {
+    # ── Solid hue tints ──
+    "red":      [(0.0, (20, 0, 0)),    (0.5, (220, 50, 50)),   (1.0, (255, 200, 200))],
+    "orange":   [(0.0, (25, 8, 0)),    (0.5, (230, 120, 20)),  (1.0, (255, 220, 160))],
+    "yellow":   [(0.0, (30, 25, 0)),   (0.5, (240, 210, 30)),  (1.0, (255, 255, 180))],
+    "green":    [(0.0, (0, 20, 0)),    (0.5, (40, 180, 60)),   (1.0, (180, 255, 180))],
+    "blue":     [(0.0, (0, 0, 30)),    (0.5, (40, 80, 220)),   (1.0, (180, 200, 255))],
+    "purple":   [(0.0, (15, 0, 25)),   (0.5, (140, 40, 200)),  (1.0, (220, 180, 255))],
+    "pink":     [(0.0, (25, 0, 10)),   (0.5, (240, 80, 150)),  (1.0, (255, 200, 230))],
+    "cyan":     [(0.0, (0, 15, 20)),   (0.5, (30, 200, 230)),  (1.0, (180, 245, 255))],
+    "brown":    [(0.0, (15, 8, 0)),    (0.5, (140, 80, 30)),   (1.0, (210, 170, 120))],
 
-    user_id = update.effective_user.id
-    if user_id not in user_pending:
-        await query.edit_message_text(
-            f'{E_CROSS} Стикер не найден. Отправь стикер заново.',
-            parse_mode=ParseMode.HTML
-        )
-        return
+    # ── Gradient themes ──
+    "sunset":   [(0.0, (20, 5, 30)),   (0.35, (180, 40, 80)),  (0.65, (240, 130, 30)), (1.0, (255, 230, 180))],
+    "ocean":    [(0.0, (0, 10, 40)),   (0.4, (0, 80, 160)),    (0.7, (0, 160, 200)),   (1.0, (180, 240, 255))],
+    "forest":   [(0.0, (5, 20, 5)),    (0.4, (20, 100, 30)),   (0.7, (80, 160, 50)),   (1.0, (200, 240, 160))],
+    "fire":     [(0.0, (10, 0, 0)),    (0.3, (180, 20, 0)),    (0.6, (240, 140, 0)),   (1.0, (255, 240, 180))],
+    "ice":      [(0.0, (10, 20, 40)),  (0.4, (80, 160, 220)),  (0.75, (180, 220, 245)),(1.0, (240, 250, 255))],
+    "sakura":   [(0.0, (30, 5, 15)),   (0.4, (220, 100, 140)), (0.75, (250, 180, 200)),(1.0, (255, 230, 240))],
+    "gold":     [(0.0, (20, 15, 0)),   (0.35, (160, 110, 0)),  (0.65, (230, 190, 30)), (1.0, (255, 245, 180))],
+    "galaxy":   [(0.0, (5, 0, 20)),    (0.3, (60, 20, 120)),   (0.6, (120, 60, 200)),  (0.85, (200, 140, 255)), (1.0, (255, 240, 255))],
+}
 
-    color_name = query.data.replace("color:", "")
-    pending = user_pending[user_id]
-    stype = pending["type"]
-    type_icon = {"animated": E_ANIM, "video": E_VIDEO, "static": E_STICKER}.get(stype, E_STICKER)
 
-    if color_name == "all_pack":
-        await query.edit_message_text(
-            f'{E_PAINT} <b>Добавляю все 20 цветов в пак...</b>\n'
-            f'{E_CLOCK} Это займёт ~40 секунд, подожди!',
-            parse_mode=ParseMode.HTML
-        )
-        colors = [key for _, key, _, _ in COLOR_PRESETS]
-        added = 0
-        pack_name = None
-        errors = []
-
-        for color in colors:
-            try:
-                pack_name = await colorize_and_add(context, user_id, pending, color)
-                added += 1
-                await asyncio.sleep(0.5)
-            except Exception as ex:
-                logger.error(f"Error adding color {color}: {ex}")
-                errors.append(color)
-
-        if pack_name:
-            err_note = f'\n{E_CROSS} Не удалось: {len(errors)} шт.' if errors else ""
-            await query.edit_message_text(
-                f'{E_PARTY} <b>Готово! Добавлено {added}/20 стикеров!</b>{err_note}',
-                parse_mode=ParseMode.HTML,
-                reply_markup=make_pack_link_keyboard(pack_name)
-            )
-        else:
-            await query.edit_message_text(
-                f'{E_CROSS} Не удалось создать пак. Попробуй снова.',
-                parse_mode=ParseMode.HTML
-            )
-
-    else:
-        await query.edit_message_text(
-            f'{type_icon} <b>Раскрашиваю и добавляю в пак...</b>',
-            parse_mode=ParseMode.HTML
-        )
-        try:
-            pack_name = await colorize_and_add(context, user_id, pending, color_name)
-            # Find label for this color
-            label = next((lbl for lbl, key, _, _ in COLOR_PRESETS if key == color_name), color_name)
-
-            await query.edit_message_text(
-                f'{E_CHECK} <b>Добавлено!</b> Цвет: {label}',
-                parse_mode=ParseMode.HTML,
-                reply_markup=make_pack_link_keyboard(pack_name)
-            )
-        except TelegramError as ex:
-            logger.error(f"Telegram error: {ex}")
-            await query.edit_message_text(
-                f'{E_CROSS} <b>Ошибка Telegram:</b> {ex}\n\nПопробуй отправить стикер заново.',
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as ex:
-            logger.error(f"Processing error: {ex}")
-            await query.edit_message_text(
-                f'{E_CROSS} <b>Ошибка обработки:</b> {ex}',
-                parse_mode=ParseMode.HTML
-            )
+def interpolate_color_map(lum: float, cmap: list) -> tuple:
+    """Linearly interpolate between color stops based on luminance."""
+    # cmap is list of (threshold, (R,G,B))
+    if lum <= cmap[0][0]:
+        return cmap[0][1]
+    if lum >= cmap[-1][0]:
+        return cmap[-1][1]
+    for i in range(len(cmap) - 1):
+        t0, c0 = cmap[i]
+        t1, c1 = cmap[i + 1]
+        if t0 <= lum <= t1:
+            ratio = (lum - t0) / (t1 - t0)
+            r = int(c0[0] + ratio * (c1[0] - c0[0]))
+            g = int(c0[1] + ratio * (c1[1] - c0[1]))
+            b = int(c0[2] + ratio * (c1[2] - c0[2]))
+            return r, g, b
+    return cmap[-1][1]
 
 
 # ──────────────────────────────────────────────────────────────
-# Entry point
+# Grayscale
 # ──────────────────────────────────────────────────────────────
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("mypack", my_pack))
-    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
-    app.add_handler(CallbackQueryHandler(handle_color_callback, pattern=r"^color:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("Bot started!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+def apply_grayscale(img: Image.Image) -> Image.Image:
+    arr = to_numpy(img)
+    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+    lum = (0.299 * r + 0.587 * g + 0.114 * b)
+    result = np.stack([lum, lum, lum, a], axis=-1)
+    return from_numpy(result)
 
 
-if __name__ == "__main__":
-    main()
-    
+# ──────────────────────────────────────────────────────────────
+# Rainbow mode
+# ──────────────────────────────────────────────────────────────
+
+def apply_rainbow(img: Image.Image) -> Image.Image:
+    arr = to_numpy(img)
+    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+    # Map luminance to hue cycle (full rainbow)
+    hue = lum  # 0=red → 0.33=green → 0.66=blue → 1=red
+
+    new_r = np.zeros_like(r)
+    new_g = np.zeros_like(g)
+    new_b = np.zeros_like(b)
+
+    for y in range(arr.shape[0]):
+        for x in range(arr.shape[1]):
+            if a[y, x] > 10:  # skip transparent
+                h = lum[y, x]
+                # Saturation varies: brightest pixels stay slightly pastel
+                sat = 0.9 - lum[y, x] * 0.3
+                light = 0.25 + lum[y, x] * 0.5
+                nr, ng, nb = hsl_to_rgb(h, sat, light)
+                new_r[y, x] = nr
+                new_g[y, x] = ng
+                new_b[y, x] = nb
+
+    result = np.stack([new_r, new_g, new_b, a], axis=-1)
+    return from_numpy(result)
+
+
+# ──────────────────────────────────────────────────────────────
+# Random color
+# ──────────────────────────────────────────────────────────────
+
+def apply_random(img: Image.Image) -> Image.Image:
+    hue = random.random()
+    # Build a random gradient color map
+    dark = hsl_to_rgb(hue, 0.9, 0.15)
+    mid = hsl_to_rgb(hue, 0.85, 0.50)
+    light = hsl_to_rgb(hue, 0.5, 0.85)
+    cmap = [(0.0, dark), (0.5, mid), (1.0, light)]
+    return apply_color_map(img, cmap)
+
+
+# ──────────────────────────────────────────────────────────────
+# Generic color map application
+# ──────────────────────────────────────────────────────────────
+
+def apply_color_map(img: Image.Image, cmap: list) -> Image.Image:
+    arr = to_numpy(img)
+    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
+    lum_map = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+    new_r = np.zeros_like(r)
+    new_g = np.zeros_like(g)
+    new_b = np.zeros_like(b)
+
+    for y in range(arr.shape[0]):
+        for x in range(arr.shape[1]):
+            if a[y, x] > 10:
+                lum = float(lum_map[y, x])
+                nr, ng, nb = interpolate_color_map(lum, cmap)
+                new_r[y, x] = nr
+                new_g[y, x] = ng
+                new_b[y, x] = nb
+
+    result = np.stack([new_r, new_g, new_b, a], axis=-1)
+    return from_numpy(result)
+
+
+# ──────────────────────────────────────────────────────────────
+# Main entry point
+# ──────────────────────────────────────────────────────────────
+
+def apply_color(img: Image.Image, color: str) -> Image.Image:
+    """
+    Apply a named color effect to an RGBA image.
+    Returns a new RGBA image.
+    """
+    img = img.convert("RGBA")
+
+    if color == "grayscale":
+        return apply_grayscale(img)
+
+    if color == "rainbow":
+        return apply_rainbow(img)
+
+    if color == "random":
+        return apply_random(img)
+
+    if color in COLOR_MAPS:
+        return apply_color_map(img, COLOR_MAPS[color])
+
+    # Fallback: treat as grayscale
+    return apply_grayscale(img)
+                   
+"""
+tgs_colorizer.py — Colorize animated Telegram stickers (.tgs)
+
+.tgs files are gzip-compressed Lottie JSON animations.
+We decompress, walk the JSON tree, recolor all color values,
+then recompress back to .tgs
+
+Lottie color values are stored as arrays [R, G, B] or [R, G, B, A]
+with values in 0.0–1.0 range.
+"""
+
+import gzip
+import json
+import copy
+import random
+import math
+from typing import Any
+
+
+# ──────────────────────────────────────────────────────────────
+# Color theme definitions (same names as colorizer.py)
+# Each theme: {"dark": [r,g,b], "mid": [r,g,b], "light": [r,g,b]}
+# Values 0.0–1.0 (Lottie format)
+# ──────────────────────────────────────────────────────────────
+
+def _rgb(r, g, b):
+    return [r / 255, g / 255, b / 255]
+
+
+THEMES = {
+    "red":      {"dark": _rgb(20, 0, 0),    "mid": _rgb(220, 50, 50),   "light": _rgb(255, 200, 200)},
+    "orange":   {"dark": _rgb(25, 8, 0),    "mid": _rgb(230, 120, 20),  "light": _rgb(255, 220, 160)},
+    "yellow":   {"dark": _rgb(30, 25, 0),   "mid": _rgb(240, 210, 30),  "light": _rgb(255, 255, 180)},
+    "green":    {"dark": _rgb(0, 20, 0),    "mid": _rgb(40, 180, 60),   "light": _rgb(180, 255, 180)},
+    "blue":     {"dark": _rgb(0, 0, 30),    "mid": _rgb(40, 80, 220),   "light": _rgb(180, 200, 255)},
+    "purple":   {"dark": _rgb(15, 0, 25),   "mid": _rgb(140, 40, 200),  "light": _rgb(220, 180, 255)},
+    "pink":     {"dark": _rgb(25, 0, 10),   "mid": _rgb(240, 80, 150),  "light": _rgb(255, 200, 230)},
+    "cyan":     {"dark": _rgb(0, 15, 20),   "mid": _rgb(30, 200, 230),  "light": _rgb(180, 245, 255)},
+    "brown":    {"dark": _rgb(15, 8, 0),    "mid": _rgb(140, 80, 30),   "light": _rgb(210, 170, 120)},
+    "grayscale":{"dark": _rgb(10, 10, 10),  "mid": _rgb(128, 128, 128), "light": _rgb(240, 240, 240)},
+    "sunset":   {"dark": _rgb(20, 5, 30),   "mid": _rgb(200, 60, 60),   "light": _rgb(255, 220, 100)},
+    "ocean":    {"dark": _rgb(0, 10, 40),   "mid": _rgb(0, 100, 180),   "light": _rgb(180, 240, 255)},
+    "forest":   {"dark": _rgb(5, 20, 5),    "mid": _rgb(30, 120, 40),   "light": _rgb(200, 240, 160)},
+    "fire":     {"dark": _rgb(10, 0, 0),    "mid": _rgb(220, 80, 0),    "light": _rgb(255, 240, 100)},
+    "ice":      {"dark": _rgb(10, 20, 40),  "mid": _rgb(80, 160, 220),  "light": _rgb(240, 250, 255)},
+    "sakura":   {"dark": _rgb(30, 5, 15),   "mid": _rgb(220, 100, 140), "light": _rgb(255, 230, 240)},
+    "gold":     {"dark": _rgb(20, 15, 0),   "mid": _rgb(180, 130, 0),   "light": _rgb(255, 245, 180)},
+    "galaxy":   {"dark": _rgb(5, 0, 20),    "mid": _rgb(100, 40, 180),  "light": _rgb(220, 160, 255)},
+    "rainbow":  None,  # special handling
+    "random":   None,  # special handling
+}
+
+
+def _lerp(a, b, t):
+    return a + (b - a)
