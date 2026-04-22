@@ -211,3 +211,4 @@ def apply_color(img: Image.Image, color: str) -> Image.Image:
 
     # Fallback: treat as grayscale
     return apply_grayscale(img)
+                   
