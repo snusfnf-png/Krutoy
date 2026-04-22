@@ -1,128 +1,241 @@
-"""
-colorizer.py — Fast vectorized image colorizer using numpy.
-No per-pixel loops — works fast on Railway free tier.
-"""
-
-import random
-import numpy as np
-from PIL import Image
-
-
-# Color map: list of (threshold 0.0-1.0, (R, G, B))
-COLOR_MAPS = {
-    "red":      [(0.0, (20, 0, 0)),    (0.5, (220, 50, 50)),   (1.0, (255, 200, 200))],
-    "orange":   [(0.0, (25, 8, 0)),    (0.5, (230, 120, 20)),  (1.0, (255, 220, 160))],
-    "yellow":   [(0.0, (30, 25, 0)),   (0.5, (240, 210, 30)),  (1.0, (255, 255, 180))],
-    "green":    [(0.0, (0, 20, 0)),    (0.5, (40, 180, 60)),   (1.0, (180, 255, 180))],
-    "blue":     [(0.0, (0, 0, 30)),    (0.5, (40, 80, 220)),   (1.0, (180, 200, 255))],
-    "purple":   [(0.0, (15, 0, 25)),   (0.5, (140, 40, 200)),  (1.0, (220, 180, 255))],
-    "pink":     [(0.0, (25, 0, 10)),   (0.5, (240, 80, 150)),  (1.0, (255, 200, 230))],
-    "cyan":     [(0.0, (0, 15, 20)),   (0.5, (30, 200, 230)),  (1.0, (180, 245, 255))],
-    "brown":    [(0.0, (15, 8, 0)),    (0.5, (140, 80, 30)),   (1.0, (210, 170, 120))],
-    "sunset":   [(0.0, (20, 5, 30)),   (0.35,(180, 40, 80)),   (0.65,(240, 130, 30)),  (1.0, (255, 230, 180))],
-    "ocean":    [(0.0, (0, 10, 40)),   (0.4, (0, 80, 160)),    (0.7, (0, 160, 200)),   (1.0, (180, 240, 255))],
-    "forest":   [(0.0, (5, 20, 5)),    (0.4, (20, 100, 30)),   (0.7, (80, 160, 50)),   (1.0, (200, 240, 160))],
-    "fire":     [(0.0, (10, 0, 0)),    (0.3, (180, 20, 0)),    (0.6, (240, 140, 0)),   (1.0, (255, 240, 180))],
-    "ice":      [(0.0, (10, 20, 40)),  (0.4, (80, 160, 220)),  (0.75,(180, 220, 245)), (1.0, (240, 250, 255))],
-    "sakura":   [(0.0, (30, 5, 15)),   (0.4, (220, 100, 140)), (0.75,(250, 180, 200)), (1.0, (255, 230, 240))],
-    "gold":     [(0.0, (20, 15, 0)),   (0.35,(160, 110, 0)),   (0.65,(230, 190, 30)),  (1.0, (255, 245, 180))],
-    "galaxy":   [(0.0, (5, 0, 20)),    (0.3, (60, 20, 120)),   (0.6, (120, 60, 200)),  (0.85,(200, 140, 255)), (1.0, (255, 240, 255))],
-}
+import io
+import json
+import gzip
+import struct
+import re
+import math
+from PIL import Image, ImageOps
+import cairosvg
+import lottie
+from lottie import objects as lo
+from lottie.exporters import exporters as lottie_exporters
+from lottie.parsers import parsers as lottie_parsers
 
 
-def _build_lut(cmap: list) -> np.ndarray:
-    """Build 256-entry RGB lookup table from color map stops."""
-    lut = np.zeros((256, 3), dtype=np.uint8)
-    for i in range(256):
-        t = i / 255.0
-        # Find surrounding stops
-        if t <= cmap[0][0]:
-            lut[i] = cmap[0][1]
+def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) == 3:
+        hex_color = "".join(c * 2 for c in hex_color)
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    return r, g, b
+
+
+def hex_to_lottie_color(hex_color: str) -> list[float]:
+    r, g, b = hex_to_rgb(hex_color)
+    return [r / 255.0, g / 255.0, b / 255.0, 1.0]
+
+
+def recolor_static_webp(image_data: bytes, hex_color: str) -> bytes:
+    """Recolor a static WebP/PNG sticker."""
+    img = Image.open(io.BytesIO(image_data)).convert("RGBA")
+    r_new, g_new, b_new = hex_to_rgb(hex_color)
+
+    r, g, b, a = img.split()
+
+    # Convert to grayscale luminance for preserving shadows/highlights
+    gray = ImageOps.grayscale(img)
+
+    # Create new colored image
+    r_channel = gray.point(lambda x: int(x * r_new / 255))
+    g_channel = gray.point(lambda x: int(x * g_new / 255))
+    b_channel = gray.point(lambda x: int(x * b_new / 255))
+
+    colored = Image.merge("RGBA", (r_channel, g_channel, b_channel, a))
+
+    out = io.BytesIO()
+    colored.save(out, format="WEBP", lossless=True)
+    return out.getvalue()
+
+
+def recolor_static_png(image_data: bytes, hex_color: str) -> bytes:
+    """Recolor a static PNG sticker."""
+    img = Image.open(io.BytesIO(image_data)).convert("RGBA")
+    r_new, g_new, b_new = hex_to_rgb(hex_color)
+
+    r, g, b, a = img.split()
+    gray = ImageOps.grayscale(img)
+
+    r_channel = gray.point(lambda x: int(x * r_new / 255))
+    g_channel = gray.point(lambda x: int(x * g_new / 255))
+    b_channel = gray.point(lambda x: int(x * b_new / 255))
+
+    colored = Image.merge("RGBA", (r_channel, g_channel, b_channel, a))
+
+    out = io.BytesIO()
+    colored.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _recolor_lottie_value(val, target_color: list):
+    """Recursively replace color values in lottie JSON."""
+    if isinstance(val, dict):
+        # Color keyframe animated
+        if val.get("ty") == "st" or val.get("ty") == "fl":
+            # stroke or fill
+            if "c" in val:
+                _recolor_lottie_color_prop(val["c"], target_color)
+        else:
+            for k, v in val.items():
+                if k == "c" and isinstance(v, dict):
+                    _recolor_lottie_color_prop(v, target_color)
+                else:
+                    _recolor_lottie_value(v, target_color)
+    elif isinstance(val, list):
+        for item in val:
+            _recolor_lottie_value(item, target_color)
+
+
+def _recolor_lottie_color_prop(color_prop: dict, target_color: list):
+    """Replace color values in a lottie color property (animated or static)."""
+    if "a" in color_prop and "k" in color_prop:
+        if color_prop["a"] == 0:
+            # Static color
+            if isinstance(color_prop["k"], list) and len(color_prop["k"]) >= 3:
+                # Preserve alpha
+                alpha = color_prop["k"][3] if len(color_prop["k"]) > 3 else 1.0
+                if alpha > 0:
+                    color_prop["k"] = [target_color[0], target_color[1], target_color[2], alpha]
+        else:
+            # Animated color keyframes
+            if isinstance(color_prop["k"], list):
+                for keyframe in color_prop["k"]:
+                    if isinstance(keyframe, dict):
+                        for key in ("s", "e"):
+                            if key in keyframe and isinstance(keyframe[key], list) and len(keyframe[key]) >= 3:
+                                alpha = keyframe[key][3] if len(keyframe[key]) > 3 else 1.0
+                                if alpha > 0:
+                                    keyframe[key] = [target_color[0], target_color[1], target_color[2], alpha]
+
+
+def _walk_lottie_layers(layers: list, target_color: list):
+    """Walk through all lottie layers and recolor."""
+    for layer in layers:
+        if not isinstance(layer, dict):
             continue
-        if t >= cmap[-1][0]:
-            lut[i] = cmap[-1][1]
+        # Recurse into precompose layers
+        if "layers" in layer:
+            _walk_lottie_layers(layer["layers"], target_color)
+        # Walk shapes
+        if "shapes" in layer:
+            _walk_shapes(layer["shapes"], target_color)
+        # Walk effects
+        if "ef" in layer:
+            _walk_lottie_value_list(layer["ef"], target_color)
+
+
+def _walk_shapes(shapes: list, target_color: list):
+    for shape in shapes:
+        if not isinstance(shape, dict):
             continue
-        for j in range(len(cmap) - 1):
-            t0, c0 = cmap[j]
-            t1, c1 = cmap[j + 1]
-            if t0 <= t <= t1:
-                ratio = (t - t0) / (t1 - t0)
-                lut[i] = (
-                    int(c0[0] + ratio * (c1[0] - c0[0])),
-                    int(c0[1] + ratio * (c1[1] - c0[1])),
-                    int(c0[2] + ratio * (c1[2] - c0[2])),
-                )
-                break
-    return lut
+        ty = shape.get("ty", "")
+        if ty in ("fl", "st", "gf", "gs"):
+            if "c" in shape:
+                _recolor_lottie_color_prop(shape["c"], target_color)
+        if "it" in shape:
+            _walk_shapes(shape["it"], target_color)
 
 
-def _hsl_to_rgb(h, s, l):
-    """HSL (0-1) to RGB (0-255)."""
-    if s == 0:
-        v = int(l * 255)
-        return v, v, v
-    def hue2rgb(p, q, t):
-        if t < 0: t += 1
-        if t > 1: t -= 1
-        if t < 1/6: return p + (q - p) * 6 * t
-        if t < 1/2: return q
-        if t < 2/3: return p + (q - p) * (2/3 - t) * 6
-        return p
-    q = l * (1 + s) if l < 0.5 else l + s - l * s
-    p = 2 * l - q
-    return int(hue2rgb(p, q, h+1/3)*255), int(hue2rgb(p, q, h)*255), int(hue2rgb(p, q, h-1/3)*255)
+def _walk_lottie_value_list(items: list, target_color: list):
+    for item in items:
+        if isinstance(item, dict):
+            _recolor_lottie_value(item, target_color)
 
 
-def apply_color(img: Image.Image, color: str) -> Image.Image:
-    img = img.convert("RGBA")
-    arr = np.array(img, dtype=np.float32)
+def recolor_tgs(tgs_data: bytes, hex_color: str) -> bytes:
+    """Recolor an animated TGS sticker (gzip'd lottie JSON)."""
+    target_color = hex_to_lottie_color(hex_color)
 
-    r, g, b, a = arr[..., 0], arr[..., 1], arr[..., 2], arr[..., 3]
-    # Perceived luminance 0-255
-    lum = (0.299 * r + 0.587 * g + 0.114 * b).astype(np.uint8)
+    # Decompress TGS (gzipped JSON)
+    json_data = gzip.decompress(tgs_data)
+    lottie_json = json.loads(json_data)
 
-    mask = a > 10  # only non-transparent pixels
+    # Walk all layers and recolor
+    if "layers" in lottie_json:
+        _walk_lottie_layers(lottie_json["layers"], target_color)
 
-    if color == "grayscale":
-        new_r = np.where(mask, lum, 0).astype(np.uint8)
-        new_g = np.where(mask, lum, 0).astype(np.uint8)
-        new_b = np.where(mask, lum, 0).astype(np.uint8)
+    # Also walk assets (precomps)
+    if "assets" in lottie_json:
+        for asset in lottie_json["assets"]:
+            if isinstance(asset, dict) and "layers" in asset:
+                _walk_lottie_layers(asset["layers"], target_color)
 
-    elif color == "rainbow":
-        # Map lum → hue, vectorized via LUT
-        rainbow_lut_r = np.zeros(256, dtype=np.uint8)
-        rainbow_lut_g = np.zeros(256, dtype=np.uint8)
-        rainbow_lut_b = np.zeros(256, dtype=np.uint8)
-        for i in range(256):
-            h = i / 255.0
-            sat = 0.9 - h * 0.3
-            light = 0.25 + h * 0.5
-            rv, gv, bv = _hsl_to_rgb(h, sat, light)
-            rainbow_lut_r[i] = rv
-            rainbow_lut_g[i] = gv
-            rainbow_lut_b[i] = bv
-        new_r = np.where(mask, rainbow_lut_r[lum], 0).astype(np.uint8)
-        new_g = np.where(mask, rainbow_lut_g[lum], 0).astype(np.uint8)
-        new_b = np.where(mask, rainbow_lut_b[lum], 0).astype(np.uint8)
+    # Recompress
+    out_json = json.dumps(lottie_json, separators=(",", ":")).encode("utf-8")
+    out_tgs = gzip.compress(out_json, compresslevel=9)
+    return out_tgs
 
-    elif color == "random":
-        hue = random.random()
-        dark  = _hsl_to_rgb(hue, 0.9, 0.15)
-        mid   = _hsl_to_rgb(hue, 0.85, 0.50)
-        light = _hsl_to_rgb(hue, 0.5, 0.85)
-        cmap = [(0.0, dark), (0.5, mid), (1.0, light)]
-        lut = _build_lut(cmap)
-        new_r = np.where(mask, lut[lum, 0], 0).astype(np.uint8)
-        new_g = np.where(mask, lut[lum, 1], 0).astype(np.uint8)
-        new_b = np.where(mask, lut[lum, 2], 0).astype(np.uint8)
 
-    else:
-        cmap = COLOR_MAPS.get(color, COLOR_MAPS["blue"])
-        lut = _build_lut(cmap)
-        new_r = np.where(mask, lut[lum, 0], 0).astype(np.uint8)
-        new_g = np.where(mask, lut[lum, 1], 0).astype(np.uint8)
-        new_b = np.where(mask, lut[lum, 2], 0).astype(np.uint8)
+def recolor_webm(webm_data: bytes, hex_color: str) -> bytes:
+    """
+    For WebM video stickers, we use ffmpeg via subprocess to apply colorize filter.
+    Returns recolored WebM bytes.
+    """
+    import subprocess
+    import tempfile
 
-    result = np.stack([new_r, new_g, new_b, a.astype(np.uint8)], axis=-1)
-    return Image.fromarray(result, "RGBA")
-        
+    r, g, b = hex_to_rgb(hex_color)
+    # Convert to hue/saturation for ffmpeg colorize
+    # Use hue+colorize filter
+    h, s, v = _rgb_to_hsv(r, g, b)
+    hue_deg = h * 360
+
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as fin:
+        fin.write(webm_data)
+        fin_path = fin.name
+
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as fout:
+        fout_path = fout.name
+
+    try:
+        # Use ffmpeg to apply hue/colorize
+        # We desaturate then apply new hue
+        cmd = [
+            "ffmpeg", "-y", "-i", fin_path,
+            "-vf", f"hue=H={hue_deg}:s=3,colorchannelmixer=rr={r/255:.3f}:gg={g/255:.3f}:bb={b/255:.3f}",
+            "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+            "-auto-alt-ref", "0",
+            fout_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode != 0:
+            # Fallback: simpler colorize
+            cmd2 = [
+                "ffmpeg", "-y", "-i", fin_path,
+                "-vf", f"colorchannelmixer=rr={r/255:.3f}:rg=0:rb=0:gr=0:gg={g/255:.3f}:gb=0:br=0:bg=0:bb={b/255:.3f}",
+                "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                "-auto-alt-ref", "0",
+                fout_path
+            ]
+            subprocess.run(cmd2, capture_output=True, timeout=60)
+
+        with open(fout_path, "rb") as f:
+            return f.read()
+    finally:
+        import os
+        os.unlink(fin_path)
+        try:
+            os.unlink(fout_path)
+        except Exception:
+            pass
+
+
+def _rgb_to_hsv(r: int, g: int, b: int) -> tuple[float, float, float]:
+    r, g, b = r / 255.0, g / 255.0, b / 255.0
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    diff = mx - mn
+    v = mx
+    s = 0.0 if mx == 0 else diff / mx
+    h = 0.0
+    if diff != 0:
+        if mx == r:
+            h = (g - b) / diff % 6
+        elif mx == g:
+            h = (b - r) / diff + 2
+        else:
+            h = (r - g) / diff + 4
+        h /= 6
+    return h, s, v
+    
