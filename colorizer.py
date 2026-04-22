@@ -1,15 +1,8 @@
 import io
 import json
 import gzip
-import struct
-import re
 import math
 from PIL import Image, ImageOps
-import cairosvg
-import lottie
-from lottie import objects as lo
-from lottie.exporters import exporters as lottie_exporters
-from lottie.parsers import parsers as lottie_parsers
 
 
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -238,4 +231,4 @@ def _rgb_to_hsv(r: int, g: int, b: int) -> tuple[float, float, float]:
             h = (r - g) / diff + 4
         h /= 6
     return h, s, v
-    
+        
