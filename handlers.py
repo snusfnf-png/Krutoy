@@ -3,14 +3,13 @@ import logging
 import re
 from aiogram import Router, Bot, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    BufferedInputFile
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import CommandStart
 
-from colorizer import recolor_static_webp, recolor_tgs, recolor_webm, recolor_static_png
+from colorizer import recolor_static_webp, recolor_tgs, recolor_webm
 from pack_manager import add_sticker_to_pack
 
 logger = logging.getLogger(__name__)
@@ -32,14 +31,6 @@ COLORS = {
     "🟣 Фиолетовый": "8800FF",
     "🩵 Голубой": "00CCFF",
 }
-
-# Store pending sticker data in FSM
-class PendingSticker:
-    def __init__(self, file_id, file_unique_id, sticker_type, emoji):
-        self.file_id = file_id
-        self.file_unique_id = file_unique_id
-        self.sticker_type = sticker_type  # "static" | "animated" | "video"
-        self.emoji = emoji
 
 
 def build_color_keyboard() -> InlineKeyboardMarkup:
@@ -66,9 +57,9 @@ def build_color_keyboard() -> InlineKeyboardMarkup:
 async def cmd_start(message: Message):
     await message.answer(
         "<b>🎨 Бот для перекраски стикеров и эмодзи</b>\n\n"
-        "Просто отправь мне <b>стикер</b> или <b>премиум эмодзи</b> — "
-        "я покрашу его в любой цвет и добавлю в твой персональный пак! 🚀\n\n"
-        "Поддерживаются: статичные, обычные и анимированные стикеры/эмодзи.",
+        "Отправь мне <b>стикер</b> или сообщение с <b>премиум эмодзи</b> — "
+        "покрашу в любой цвет и добавлю в твой пак!\n\n"
+        "Поддерживаются: статичные, анимированные и видео стикеры/эмодзи.",
         parse_mode="HTML"
     )
 
@@ -76,7 +67,7 @@ async def cmd_start(message: Message):
 @router.message(F.sticker)
 async def handle_sticker(message: Message, state: FSMContext):
     sticker = message.sticker
-    # Determine type
+
     if sticker.is_animated:
         stype = "animated"
     elif sticker.is_video:
@@ -88,39 +79,83 @@ async def handle_sticker(message: Message, state: FSMContext):
 
     await state.update_data(
         file_id=sticker.file_id,
-        file_unique_id=sticker.file_unique_id,
         sticker_type=stype,
         emoji=emoji,
-        is_custom_emoji=False,
     )
 
     type_label = {"static": "Статичный", "animated": "Анимированный", "video": "Видео"}[stype]
 
     await message.answer(
-        f"<b>Стикер получен!</b> ({type_label})\n\n"
-        f"Выбери цвет для покраски:",
+        f"<b>Стикер получен!</b> ({type_label})\n\nВыбери цвет:",
         reply_markup=build_color_keyboard(),
         parse_mode="HTML"
     )
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_text_for_hex(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state != RecolorStates.waiting_for_hex:
+@router.message(F.entities)
+async def handle_message_with_entities(message: Message, state: FSMContext):
+    """Handle messages containing premium custom emoji."""
+    if not message.entities:
         return
 
+    custom_emoji_entities = [
+        e for e in message.entities if e.type == "custom_emoji"
+    ]
+
+    if not custom_emoji_entities:
+        return
+
+    # Take first custom emoji
+    entity = custom_emoji_entities[0]
+    custom_emoji_id = entity.custom_emoji_id
+
+    # Get emoji sticker info
+    try:
+        stickers = await message.bot.get_custom_emoji_stickers([custom_emoji_id])
+        if not stickers:
+            await message.answer("❌ Не удалось получить данные эмодзи.")
+            return
+
+        sticker = stickers[0]
+        if sticker.is_animated:
+            stype = "animated"
+        elif sticker.is_video:
+            stype = "video"
+        else:
+            stype = "static"
+
+        emoji_char = sticker.emoji or "🎨"
+
+        await state.update_data(
+            file_id=sticker.file_id,
+            sticker_type=stype,
+            emoji=emoji_char,
+        )
+
+        type_label = {"static": "Статичный", "animated": "Анимированный", "video": "Видео"}[stype]
+
+        await message.answer(
+            f"<b>Премиум эмодзи получено!</b> ({type_label})\n\nВыбери цвет:",
+            reply_markup=build_color_keyboard(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.exception(f"Error handling custom emoji: {e}")
+        await message.answer(f"❌ Ошибка: <code>{str(e)[:200]}</code>", parse_mode="HTML")
+
+
+@router.message(RecolorStates.waiting_for_hex)
+async def handle_hex_input(message: Message, state: FSMContext):
     hex_input = message.text.strip().lstrip("#").upper()
     if not re.fullmatch(r"[0-9A-F]{6}", hex_input):
         await message.answer(
-            "❌ Неверный формат HEX. Пример: <code>FF5500</code> или <code>#FF5500</code>",
+            "❌ Неверный формат. Пример: <code>FF5500</code>",
             parse_mode="HTML"
         )
         return
 
-    await state.update_data(chosen_hex=hex_input)
     data = await state.get_data()
-    await state.set_state(None)
+    await state.clear()
     await process_recolor(message, message.bot, data, hex_input)
 
 
@@ -131,58 +166,49 @@ async def handle_color_choice(callback: CallbackQuery, state: FSMContext):
     if value == "custom":
         await state.set_state(RecolorStates.waiting_for_hex)
         await callback.message.edit_text(
-            "✏️ Введи HEX цвет (например: <code>FF5500</code> или <code>#1A2B3C</code>):",
+            "✏️ Введи HEX цвет (например: <code>FF5500</code>):",
             parse_mode="HTML"
         )
         await callback.answer()
         return
 
-    hex_color = value
     data = await state.get_data()
-    await state.set_state(None)
-
+    await state.clear()
     await callback.message.edit_text("⏳ Перекрашиваю...")
     await callback.answer()
-
-    await process_recolor(callback.message, callback.bot, data, hex_color)
+    await process_recolor(callback.message, callback.bot, data, value)
 
 
 async def process_recolor(message: Message, bot: Bot, data: dict, hex_color: str):
     file_id = data.get("file_id")
     sticker_type = data.get("sticker_type", "static")
     emoji = data.get("emoji", "🎨")
+    user = message.chat
 
     if not file_id:
-        await message.answer("❌ Стикер не найден. Отправь стикер снова.")
+        await message.answer("❌ Стикер не найден. Отправь снова.")
         return
 
     try:
-        await message.answer("🎨 Скачиваю и перекрашиваю...")
-
-        # Download sticker
+        # Download
         file = await bot.get_file(file_id)
-        file_bytes_io = io.BytesIO()
-        await bot.download_file(file.file_path, destination=file_bytes_io)
-        file_bytes = file_bytes_io.getvalue()
+        buf = io.BytesIO()
+        await bot.download_file(file.file_path, destination=buf)
+        file_bytes = buf.getvalue()
 
-        # Recolor based on type
+        # Recolor
         if sticker_type == "animated":
             recolored = recolor_tgs(file_bytes, hex_color)
         elif sticker_type == "video":
             recolored = recolor_webm(file_bytes, hex_color)
         else:
-            # Try WebP first, fallback to PNG
-            try:
-                recolored = recolor_static_webp(file_bytes, hex_color)
-            except Exception:
-                recolored = recolor_static_png(file_bytes, hex_color)
-
-        await message.answer("📦 Добавляю в пак...")
+            recolored = recolor_static_webp(file_bytes, hex_color)
 
         # Add to pack
         pack_name = await add_sticker_to_pack(
             bot=bot,
-            user=message.chat,
+            user_id=user.id,
+            username=getattr(user, "username", None) or str(user.id),
             sticker_file=recolored,
             sticker_format=sticker_type,
             emoji_list=[emoji],
@@ -191,18 +217,16 @@ async def process_recolor(message: Message, bot: Bot, data: dict, hex_color: str
         pack_url = f"https://t.me/addemoji/{pack_name}"
 
         await message.answer(
-            f"✅ <b>Готово!</b> Стикер покрашен в <code>#{hex_color}</code> и добавлен в твой пак!\n\n"
+            f"✅ <b>Готово!</b> Покрашено в <code>#{hex_color}</code>\n\n"
             f"👉 <a href='{pack_url}'>Открыть пак эмодзи</a>\n\n"
-            f"<i>Отправь ещё стикер для покраски 🎨</i>",
+            f"<i>Отправь ещё стикер 🎨</i>",
             parse_mode="HTML",
             disable_web_page_preview=True
         )
 
     except Exception as e:
-        logger.exception(f"Error during recolor: {e}")
+        logger.exception(f"Recolor error: {e}")
         await message.answer(
-            f"❌ <b>Ошибка при обработке:</b> <code>{str(e)[:200]}</code>\n\n"
-            "Попробуй ещё раз или отправь другой стикер.",
+            f"❌ <b>Ошибка:</b> <code>{str(e)[:300]}</code>",
             parse_mode="HTML"
-  )
-  
+    )
