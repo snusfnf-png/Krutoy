@@ -147,24 +147,13 @@ def make_pack_link_keyboard(pack_name: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def make_main_keyboard() -> dict:
-    """Reply keyboard with premium emoji icons."""
-    return {
-        "keyboard": [
-            [
-                {
-                    "text": "Мои паки",
-                    "icon_custom_emoji_id": "5884479287171485878"   # box/pack
-                },
-                {
-                    "text": "Помощь",
-                    "icon_custom_emoji_id": "6028435952299413210"   # info
-                }
-            ]
-        ],
-        "resize_keyboard": True,
-        "input_field_placeholder": "Отправь стикер для раскраски 🎨"
-    }
+def make_main_keyboard() -> ReplyKeyboardMarkup:
+    """Reply keyboard — plain text buttons (icon_custom_emoji_id not supported here)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[["📦 Мои паки", "ℹ️ Помощь"]],
+        resize_keyboard=True,
+        input_field_placeholder="Отправь стикер для раскраски 🎨"
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -285,13 +274,6 @@ async def colorize_and_add(
 # ──────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from telegram import ReplyKeyboardMarkup as RKM
-    kb = make_main_keyboard()
-    reply_kb = RKM(
-        keyboard=kb["keyboard"],
-        resize_keyboard=True,
-        input_field_placeholder=kb.get("input_field_placeholder")
-    )
     await update.message.reply_text(
         f'{E_BOT} <b>Привет! Я раскрашиваю стикеры и сохраняю в твой личный пак!</b>\n\n'
         f'{E_STICKER} Статичные стикеры\n'
@@ -302,7 +284,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'Когда пак заполнится (120 шт) — создам новый автоматически!\n\n'
         f'{E_SMILE} Отправь стикер прямо сейчас 👇',
         parse_mode=ParseMode.HTML,
-        reply_markup=reply_kb
+        reply_markup=make_main_keyboard()
     )
 
 
@@ -428,9 +410,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle reply keyboard buttons."""
     text = update.message.text
 
-    if text == "Мои паки":
+    if text in ("📦 Мои паки", "Мои паки"):
         await my_pack(update, context)
-    elif text == "Помощь":
+    elif text in ("ℹ️ Помощь", "Помощь"):
         await help_cmd(update, context)
     else:
         await update.message.reply_text(
@@ -542,3 +524,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
