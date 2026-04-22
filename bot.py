@@ -3,7 +3,6 @@ bot.py — Telegram Sticker Colorizer Bot
 
 Supports: static stickers, animated stickers (.tgs), video stickers, photos
 Creates personal sticker packs per user, auto-creates new pack when full.
-Uses premium emoji in all messages, buttons and keyboards.
 """
 
 import logging
@@ -38,10 +37,8 @@ MAX_STICKERS_PER_PACK = 120
 # ──────────────────────────────────────────────────────────────
 
 def e(emoji_id: str, fallback: str = "•") -> str:
-    """Return fallback emoji; keeps compatibility with all Bot API deployments."""
     return fallback
 
-# Shortcut constants
 E_SETTINGS = e("5870982283724328568", "⚙")
 E_PROFILE  = e("5870994129244131212", "👤")
 E_CHECK    = e("5870633910337015697", "✅")
@@ -73,7 +70,6 @@ E_CALENDAR = e("5890937706803894250", "📅")
 # Color palette
 # ──────────────────────────────────────────────────────────────
 
-# (label, color_key, emoji_id, fallback)
 COLOR_PRESETS = [
     ("Красный",    "red",       "5870657884844462243", "🔴"),
     ("Оранжевый",  "orange",    "5870657884844462243", "🟠"),
@@ -97,7 +93,6 @@ COLOR_PRESETS = [
     ("Золото",     "gold",      "5769289093221454192", "☀️"),
 ]
 
-# pending stickers: {user_id: {"data": bytes, "type": str, "emoji": str}}
 user_pending = {}
 
 # ──────────────────────────────────────────────────────────────
@@ -105,41 +100,26 @@ user_pending = {}
 # ──────────────────────────────────────────────────────────────
 
 def make_color_keyboard() -> InlineKeyboardMarkup:
-    """Inline keyboard with regular emoji labels (works in all Bot API versions)."""
     buttons = []
     for i in range(0, len(COLOR_PRESETS), 2):
         row = []
-        label, key, _emoji_id, fallback = COLOR_PRESETS[i]
-        row.append(InlineKeyboardButton(
-            text=f"{fallback} {label}",
-            callback_data=f"color:{key}"
-        ))
+        label, key, _eid, fallback = COLOR_PRESETS[i]
+        row.append(InlineKeyboardButton(text=f"{fallback} {label}", callback_data=f"color:{key}"))
         if i + 1 < len(COLOR_PRESETS):
-            label2, key2, _emoji_id2, fallback2 = COLOR_PRESETS[i + 1]
-            row.append(InlineKeyboardButton(
-                text=f"{fallback2} {label2}",
-                callback_data=f"color:{key2}"
-            ))
+            label2, key2, _eid2, fallback2 = COLOR_PRESETS[i + 1]
+            row.append(InlineKeyboardButton(text=f"{fallback2} {label2}", callback_data=f"color:{key2}"))
         buttons.append(row)
-    # "All colors" button
-    buttons.append([InlineKeyboardButton(
-        text="🖌 Все 20 цветов → в пак",
-        callback_data="color:all_pack"
-    )])
+    buttons.append([InlineKeyboardButton(text="🖌 Все 20 цветов → в пак", callback_data="color:all_pack")])
     return InlineKeyboardMarkup(buttons)
 
 
 def make_pack_link_keyboard(pack_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            text="🔗 Открыть пак",
-            url=f"https://t.me/addstickers/{pack_name}",
-        )
+        InlineKeyboardButton(text="🔗 Открыть пак", url=f"https://t.me/addstickers/{pack_name}")
     ]])
 
 
 def make_main_keyboard() -> ReplyKeyboardMarkup:
-    """Reply keyboard — plain text buttons (icon_custom_emoji_id not supported here)."""
     return ReplyKeyboardMarkup(
         keyboard=[["📦 Мои паки", "ℹ️ Помощь"]],
         resize_keyboard=True,
@@ -198,11 +178,9 @@ async def add_to_pack(
     pack_info = await find_current_pack(context, user_id, stype)
     fmt = {"animated": "animated", "video": "video", "static": "static"}.get(stype, "static")
     ext = {"animated": "sticker.tgs", "video": "sticker.webm", "static": "sticker.png"}.get(stype, "sticker.png")
-
     buf = io.BytesIO(sticker_bytes)
     buf.name = ext
     sticker = InputSticker(sticker=buf, emoji_list=[emoji], format=fmt)
-
     if not pack_info["exists"]:
         await context.bot.create_new_sticker_set(
             user_id=user_id,
@@ -245,14 +223,12 @@ async def colorize_and_add(
     stype = pending["type"]
     emoji = pending.get("emoji", "🎨")
     data = pending["data"]
-
     if stype == "animated":
         result = colorize_tgs(data, color)
     elif stype == "video":
-        result = data  # passthrough (ffmpeg too heavy for free Railway)
+        result = data
     else:
         result = process_static(data, color)
-
     return await add_to_pack(context, user_id, result, stype, emoji)
 
 # ──────────────────────────────────────────────────────────────
@@ -260,154 +236,167 @@ async def colorize_and_add(
 # ──────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f'{E_BOT} <b>Привет! Я раскрашиваю стикеры и сохраняю в твой личный пак!</b>\n\n'
-        f'{E_STICKER} Статичные стикеры\n'
-        f'{E_ANIM} Анимированные стикеры (.tgs)\n'
-        f'{E_VIDEO} Видео стикеры\n'
-        f'{E_PAINT} Фото и изображения\n\n'
-        f'{E_PACK} <b>Каждый пользователь получает свой пак.</b>\n'
-        f'Когда пак заполнится (120 шт) — создам новый автоматически!\n\n'
-        f'{E_SMILE} Отправь стикер прямо сейчас 👇',
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_main_keyboard()
-    )
+    try:
+        await update.message.reply_text(
+            f'{E_BOT} <b>Привет! Я раскрашиваю стикеры и сохраняю в твой личный пак!</b>\n\n'
+            f'{E_STICKER} Статичные стикеры\n'
+            f'{E_ANIM} Анимированные стикеры (.tgs)\n'
+            f'{E_VIDEO} Видео стикеры\n'
+            f'{E_PAINT} Фото и изображения\n\n'
+            f'{E_PACK} <b>Каждый пользователь получает свой пак.</b>\n'
+            f'Когда пак заполнится (120 шт) — создам новый автоматически!\n\n'
+            f'{E_SMILE} Отправь стикер прямо сейчас 👇',
+            parse_mode=ParseMode.HTML,
+            reply_markup=make_main_keyboard()
+        )
+    except Exception as ex:
+        logger.error(f"start error: {ex}")
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f'{E_INFO} <b>Справка</b>\n\n'
-        f'{E_PENCIL} <b>Как пользоваться:</b>\n'
-        f'1. Отправь стикер любого типа\n'
-        f'2. Нажми нужный цвет\n'
-        f'3. Получи ссылку на пак {E_CHECK}\n\n'
-        f'{E_PACK} <b>Типы паков:</b>\n'
-        f'• Статичные стикеры → отдельный пак\n'
-        f'• Анимированные → отдельный пак\n'
-        f'• Видео-стикеры → отдельный пак\n\n'
-        f'{E_PAINT} Режим «Все 20 цветов» добавляет всё сразу!\n\n'
-        f'{E_NOTIFY} Команды:\n'
-        f'/mypack — ссылки на твои паки\n'
-        f'/help — эта справка',
-        parse_mode=ParseMode.HTML
-    )
+    try:
+        await update.message.reply_text(
+            f'{E_INFO} <b>Справка</b>\n\n'
+            f'{E_PENCIL} <b>Как пользоваться:</b>\n'
+            f'1. Отправь стикер любого типа\n'
+            f'2. Нажми нужный цвет\n'
+            f'3. Получи ссылку на пак {E_CHECK}\n\n'
+            f'{E_PACK} <b>Типы паков:</b>\n'
+            f'• Статичные стикеры → отдельный пак\n'
+            f'• Анимированные → отдельный пак\n'
+            f'• Видео-стикеры → отдельный пак\n\n'
+            f'{E_PAINT} Режим «Все 20 цветов» добавляет всё сразу!\n\n'
+            f'{E_NOTIFY} Команды:\n'
+            f'/mypack — ссылки на твои паки\n'
+            f'/help — эта справка',
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as ex:
+        logger.error(f"help error: {ex}")
 
 
 async def my_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    bot_username = (await context.bot.get_me()).username
-    lines = [f'{E_PACK} <b>Твои паки:</b>\n']
-    found = False
-    for stype, icon in [("static", E_STICKER), ("animated", E_ANIM), ("video", E_VIDEO)]:
-        key = pack_registry_key(user_id, stype)
-        if key not in context.bot_data:
-            continue
-        max_index = context.bot_data[key].get("index", 1)
-        for idx in range(1, max_index + 1):
-            pack_name = build_pack_name(user_id, bot_username, idx, stype)
-            try:
-                pack = await context.bot.get_sticker_set(pack_name)
-                lines.append(
-                    f'{icon} <a href="https://t.me/addstickers/{pack_name}">{pack.title}</a>'
-                    f' — {len(pack.stickers)} шт.'
-                )
-                found = True
-            except Exception:
-                pass
-    if not found:
-        lines.append(f'{E_SMILE} Паков пока нет. Отправь стикер и раскрась его!')
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
+    try:
+        user_id = update.effective_user.id
+        bot_username = (await context.bot.get_me()).username
+        lines = [f'{E_PACK} <b>Твои паки:</b>\n']
+        found = False
+        for stype, icon in [("static", E_STICKER), ("animated", E_ANIM), ("video", E_VIDEO)]:
+            key = pack_registry_key(user_id, stype)
+            if key not in context.bot_data:
+                continue
+            max_index = context.bot_data[key].get("index", 1)
+            for idx in range(1, max_index + 1):
+                pack_name = build_pack_name(user_id, bot_username, idx, stype)
+                try:
+                    pack = await context.bot.get_sticker_set(pack_name)
+                    lines.append(
+                        f'{icon} <a href="https://t.me/addstickers/{pack_name}">{pack.title}</a>'
+                        f' — {len(pack.stickers)} шт.'
+                    )
+                    found = True
+                except Exception:
+                    pass
+        if not found:
+            lines.append(f'{E_SMILE} Паков пока нет. Отправь стикер и раскрась его!')
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    except Exception as ex:
+        logger.error(f"my_pack error: {ex}")
+        await update.message.reply_text(f'{E_CROSS} Ошибка при получении паков.')
 
 # ──────────────────────────────────────────────────────────────
 # Message handlers
 # ──────────────────────────────────────────────────────────────
 
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sticker = update.message.sticker
-    user_id = update.effective_user.id
-    emoji = sticker.emoji or "🎨"
-
-    file = await sticker.get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-
-    if sticker.is_animated:
-        stype = "animated"
-        msg = f'{E_ANIM} <b>Анимированный стикер получен!</b> Выбери цвет:'
-    elif sticker.is_video:
-        stype = "video"
-        msg = f'{E_VIDEO} <b>Видео-стикер получен!</b> Выбери цвет:'
-    else:
-        stype = "static"
-        msg = f'{E_STICKER} <b>Стикер получен!</b> Выбери цвет:'
-
-    user_pending[user_id] = {"data": buf.getvalue(), "type": stype, "emoji": emoji}
-    await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+    try:
+        sticker = update.message.sticker
+        user_id = update.effective_user.id
+        emoji = sticker.emoji or "🎨"
+        file = await sticker.get_file()
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        if sticker.is_animated:
+            stype = "animated"
+            msg = f'{E_ANIM} <b>Анимированный стикер получен!</b> Выбери цвет:'
+        elif sticker.is_video:
+            stype = "video"
+            msg = f'{E_VIDEO} <b>Видео-стикер получен!</b> Выбери цвет:'
+        else:
+            stype = "static"
+            msg = f'{E_STICKER} <b>Стикер получен!</b> Выбери цвет:'
+        user_pending[user_id] = {"data": buf.getvalue(), "type": stype, "emoji": emoji}
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=make_color_keyboard())
+    except Exception as ex:
+        logger.error(f"handle_sticker error: {ex}")
+        await update.message.reply_text(f'{E_CROSS} Ошибка при обработке стикера: {ex}')
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-    user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": "static", "emoji": "🖼"}
-    await update.message.reply_text(
-        f'{E_STICKER} <b>Фото получено!</b> Выбери цвет:',
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+    try:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": "static", "emoji": "🖼"}
+        await update.message.reply_text(
+            f'{E_STICKER} <b>Фото получено!</b> Выбери цвет:',
+            parse_mode=ParseMode.HTML,
+            reply_markup=make_color_keyboard()
+        )
+    except Exception as ex:
+        logger.error(f"handle_photo error: {ex}")
+        await update.message.reply_text(f'{E_CROSS} Ошибка при обработке фото: {ex}')
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if doc.mime_type not in ("image/png", "image/webp", "image/jpeg"):
+    try:
+        doc = update.message.document
+        if doc.mime_type not in ("image/png", "image/webp", "image/jpeg"):
+            await update.message.reply_text(f'{E_CROSS} Поддерживаются PNG, WEBP, JPEG.', parse_mode=ParseMode.HTML)
+            return
+        file = await doc.get_file()
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": "static", "emoji": "🖼"}
         await update.message.reply_text(
-            f'{E_CROSS} Поддерживаются PNG, WEBP, JPEG.',
-            parse_mode=ParseMode.HTML
+            f'{E_STICKER} <b>Файл получен!</b> Выбери цвет:',
+            parse_mode=ParseMode.HTML,
+            reply_markup=make_color_keyboard()
         )
-        return
-    file = await doc.get_file()
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-    user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": "static", "emoji": "🖼"}
-    await update.message.reply_text(
-        f'{E_STICKER} <b>Файл получен!</b> Выбери цвет:',
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+    except Exception as ex:
+        logger.error(f"handle_document error: {ex}")
+        await update.message.reply_text(f'{E_CROSS} Ошибка при обработке файла: {ex}')
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text, reply keyboard buttons and premium custom emoji."""
-    text = update.message.text or ""
-    custom_emoji_id = _extract_custom_emoji_id(update)
-    if custom_emoji_id:
-        await handle_custom_emoji(update, context, custom_emoji_id)
-        return
-
-    if text in ("📦 Мои паки", "Мои паки"):
-        await my_pack(update, context)
-    elif text in ("ℹ️ Помощь", "Помощь"):
-        await help_cmd(update, context)
-    elif text.strip().lower() in ("старт", "start"):
-        await start(update, context)
-    else:
-        await update.message.reply_text(
-            f'{E_SMILE} Отправь стикер, фото, премиум-эмодзи или PNG/WEBP файл — раскрашу!\n/help — справка',
-            parse_mode=ParseMode.HTML
-        )
+    try:
+        text = update.message.text or ""
+        custom_emoji_id = _extract_custom_emoji_id(update)
+        if custom_emoji_id:
+            await handle_custom_emoji(update, context, custom_emoji_id)
+            return
+        if text in ("📦 Мои паки", "Мои паки"):
+            await my_pack(update, context)
+        elif text in ("ℹ️ Помощь", "Помощь"):
+            await help_cmd(update, context)
+        elif text.strip().lower() in ("старт", "start"):
+            await start(update, context)
+        else:
+            await update.message.reply_text(
+                f'{E_SMILE} Отправь стикер, фото, премиум-эмодзи или PNG/WEBP файл — раскрашу!\n/help — справка',
+                parse_mode=ParseMode.HTML
+            )
+    except Exception as ex:
+        logger.error(f"handle_text error: {ex}")
+        await update.message.reply_text(f'{E_CROSS} Что-то пошло не так: {ex}')
 
 
 def _extract_custom_emoji_id(update: Update) -> str | None:
-    """Extract first custom emoji id from a text/caption message."""
     msg = update.message
     if not msg:
         return None
@@ -419,39 +408,32 @@ def _extract_custom_emoji_id(update: Update) -> str | None:
 
 
 async def handle_custom_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE, custom_emoji_id: str):
-    """Load premium emoji sticker by custom_emoji_id and start color flow."""
-    stickers = await context.bot.get_custom_emoji_stickers([custom_emoji_id])
-    if not stickers:
-        await update.message.reply_text(
-            f'{E_CROSS} Не удалось получить премиум-эмодзи. Попробуй отправить другое.',
-            parse_mode=ParseMode.HTML
-        )
-        return
-    sticker = stickers[0]
-    file = await context.bot.get_file(sticker.file_id)
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-
-    if sticker.is_animated:
-        stype = "animated"
-        msg = f'{E_ANIM} <b>Премиум-эмодзи (аним.) получен!</b> Выбери цвет:'
-    elif sticker.is_video:
-        stype = "video"
-        msg = f'{E_VIDEO} <b>Премиум-эмодзи (видео) получен!</b> Выбери цвет:'
-    else:
-        stype = "static"
-        msg = f'{E_STICKER} <b>Премиум-эмодзи получен!</b> Выбери цвет:'
-
-    user_pending[update.effective_user.id] = {
-        "data": buf.getvalue(),
-        "type": stype,
-        "emoji": "🎨",
-    }
-    await update.message.reply_text(
-        msg,
-        parse_mode=ParseMode.HTML,
-        reply_markup=make_color_keyboard()
-    )
+    try:
+        stickers = await context.bot.get_custom_emoji_stickers([custom_emoji_id])
+        if not stickers:
+            await update.message.reply_text(
+                f'{E_CROSS} Не удалось получить премиум-эмодзи.',
+                parse_mode=ParseMode.HTML
+            )
+            return
+        sticker = stickers[0]
+        file = await context.bot.get_file(sticker.file_id)
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        if sticker.is_animated:
+            stype = "animated"
+            msg = f'{E_ANIM} <b>Премиум-эмодзи (аним.) получен!</b> Выбери цвет:'
+        elif sticker.is_video:
+            stype = "video"
+            msg = f'{E_VIDEO} <b>Премиум-эмодзи (видео) получен!</b> Выбери цвет:'
+        else:
+            stype = "static"
+            msg = f'{E_STICKER} <b>Премиум-эмодзи получен!</b> Выбери цвет:'
+        user_pending[update.effective_user.id] = {"data": buf.getvalue(), "type": stype, "emoji": "🎨"}
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=make_color_keyboard())
+    except Exception as ex:
+        logger.error(f"handle_custom_emoji error: {ex}")
+        await update.message.reply_text(f'{E_CROSS} Ошибка при обработке эмодзи: {ex}')
 
 # ──────────────────────────────────────────────────────────────
 # Color callback
@@ -492,7 +474,6 @@ async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as ex:
                 logger.error(f"Error adding color {color}: {ex}")
                 errors.append(color)
-
         if pack_name:
             err_note = f'\n{E_CROSS} Не удалось: {len(errors)} шт.' if errors else ""
             await query.edit_message_text(
@@ -505,26 +486,10 @@ async def handle_color_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 f'{E_CROSS} Не удалось создать пак. Попробуй снова.',
                 parse_mode=ParseMode.HTML
             )
-
     else:
         await query.edit_message_text(
             f'{type_icon} <b>Раскрашиваю и добавляю в пак...</b>',
             parse_mode=ParseMode.HTML
         )
         try:
-            pack_name = await colorize_and_add(context, user_id, pending, color_name)
-            label = next((lbl for lbl, key, _, _ in COLOR_PRESETS if key == color_name), color_name)
-            await query.edit_message_text(
-                f'{E_CHECK} <b>Добавлено!</b> Цвет: {label}',
-                parse_mode=ParseMode.HTML,
-                reply_markup=make_pack_link_keyboard(pack_name)
-            )
-        except TelegramError as ex:
-            logger.error(f"Telegram error: {ex}")
-            await query.edit_message_text(
-                f'{E_CROSS} Ошибка Telegram: {ex}',
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as ex:
-            logger.error(f"Unexpected error: {ex}")
-            awa
+            pack_name = await colorize_and_add(context, user_id, pending, col
